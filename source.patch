@@ -1,0 +1,447 @@
+diff --git a/server/src/config.rs b/server/src/config.rs
+index d2a9810..18bacc6 100644
+--- a/server/src/config.rs
++++ b/server/src/config.rs
+@@ -14,9 +14,18 @@ const DEFAULT_PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+ const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+ 
+ pub fn managed_data_dir() -> Result<PathBuf> {
+-    let home_dir = dirs::home_dir()
+-        .ok_or_else(|| Error::Config("cannot resolve user home directory".into()))?;
+-    let data_dir = home_dir.join(DATA_DIR_NAME);
++    let data_dir = match env::var_os("CURSOR_BYOK_DATA_DIR") {
++        Some(path) => {
++            let path = PathBuf::from(path);
++            if !path.is_absolute() {
++                return Err(Error::Config("CURSOR_BYOK_DATA_DIR must be absolute".into()));
++            }
++            path
++        }
++        None => dirs::home_dir()
++            .ok_or_else(|| Error::Config("cannot resolve user home directory".into()))?
++            .join(DATA_DIR_NAME),
++    };
+     fs::create_dir_all(&data_dir)?;
+     #[cfg(unix)]
+     fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
+diff --git a/server/src/cursor/services/model_catalog.rs b/server/src/cursor/services/model_catalog.rs
+index b9dbd08..206e6a9 100644
+--- a/server/src/cursor/services/model_catalog.rs
++++ b/server/src/cursor/services/model_catalog.rs
+@@ -246,9 +246,14 @@ fn context_options(context_window_tokens: Option<u64>) -> Vec<(String, String)>
+     contexts
+ }
+ 
++/// Restrict a dedicated bridge to its own provider catalogue.
++#[derive(Clone, Copy)]
++pub struct LocalCatalogOnly;
++
+ pub async fn available_models(
+     State(registry): State<TransportRegistry>,
+     Extension(proxy): Extension<CursorProxy>,
++    local_only: Option<Extension<LocalCatalogOnly>>,
+     request: Request<Body>,
+ ) -> Result<Response<Body>> {
+     let models = registry.store().models().await?;
+@@ -272,18 +277,13 @@ pub async fn available_models(
+         models: available_models,
+     }
+     .encode_to_vec();
+-    match proxy::forward_buffered(&proxy, request).await {
+-        Ok(upstream) => merge_response(upstream, local),
+-        Err(error) => {
+-            tracing::warn!(%error, "Cursor AvailableModels upstream unavailable; using local catalog");
+-            Ok(local_response(local))
+-        }
+-    }
++    catalog_response(local, local_only, proxy::forward_buffered(&proxy, request)).await
+ }
+ 
+ pub async fn usable_models(
+     State(registry): State<TransportRegistry>,
+     Extension(proxy): Extension<CursorProxy>,
++    local_only: Option<Extension<LocalCatalogOnly>>,
+     request: Request<Body>,
+ ) -> Result<Response<Body>> {
+     let models = registry.store().models().await?;
+@@ -304,13 +304,7 @@ pub async fn usable_models(
+             .collect(),
+     }
+     .encode_to_vec();
+-    match proxy::forward_buffered(&proxy, request).await {
+-        Ok(upstream) => merge_response(upstream, local),
+-        Err(error) => {
+-            tracing::warn!(%error, "Cursor GetUsableModels upstream unavailable; using local catalog");
+-            Ok(local_response(local))
+-        }
+-    }
++    catalog_response(local, local_only, proxy::forward_buffered(&proxy, request)).await
+ }
+ 
+ pub async fn default_model_for_cli(
+@@ -401,6 +395,23 @@ fn default_model_nudge_response(
+     }
+ }
+ 
++async fn catalog_response(
++    local: Vec<u8>,
++    local_only: Option<Extension<LocalCatalogOnly>>,
++    upstream: impl std::future::Future<Output = Result<proxy::BufferedResponse>>,
++) -> Result<Response<Body>> {
++    if local_only.is_some() {
++        return Ok(local_response(local));
++    }
++    match upstream.await {
++        Ok(upstream) => merge_response(upstream, local),
++        Err(error) => {
++            tracing::warn!(%error, "Cursor catalog upstream unavailable; using local catalog");
++            Ok(local_response(local))
++        }
++    }
++}
++
+ fn merge_response(upstream: proxy::BufferedResponse, extra: Vec<u8>) -> Result<Response<Body>> {
+     if !upstream.status.is_success() {
+         tracing::warn!(status = %upstream.status, "Cursor model catalog upstream rejected request; using local catalog");
+@@ -859,4 +870,58 @@ mod tests {
+             vec!["local-model-hash"]
+         );
+     }
++    #[tokio::test]
++    async fn bridge_catalogue_excludes_subscription_models_without_polling_upstream() {
++        use std::sync::atomic::{AtomicBool, Ordering};
++        let polled = AtomicBool::new(false);
++        let local = AvailableModelsAddition {
++            model_names: vec!["local-model-hash".into()],
++            models: vec![available_model(&model())],
++        }.encode_to_vec();
++        let upstream = async {
++            polled.store(true, Ordering::SeqCst);
++            Ok(proxy::BufferedResponse {
++                status: StatusCode::OK,
++                headers: Default::default(),
++                body: AvailableModelsAddition {
++                    model_names: vec!["cursor-grok-4.7-high-fast".into(), "cursor-grok-4.6-high-fast".into()],
++                    models: vec![],
++                }.encode_to_vec().into(),
++            })
++        };
++        let response = catalog_response(local, Some(Extension(LocalCatalogOnly)), upstream).await.unwrap();
++        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let (_, payload) = unary_payload(&body).unwrap();
++        let decoded = AvailableModelsAddition::decode(payload).unwrap();
++        assert_eq!(decoded.model_names, vec!["local-model-hash"]);
++        assert!(!polled.load(Ordering::SeqCst), "bridge must not fetch a subscription catalogue");
++    }
++
++    #[tokio::test]
++    async fn bridge_usable_catalogue_is_local_even_with_an_authenticated_request() {
++        let local = UsableModelsAddition { models: vec![usable_model(&model())] }.encode_to_vec();
++        let response = catalog_response(local, Some(Extension(LocalCatalogOnly)), async {
++            panic!("upstream must not be polled, regardless of login or upstream response");
++            #[allow(unreachable_code)]
++            Ok(proxy::BufferedResponse { status: StatusCode::OK, headers: Default::default(), body: Bytes::new() })
++        }).await.unwrap();
++        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let (_, payload) = unary_payload(&body).unwrap();
++        let decoded = UsableModelsAddition::decode(payload).unwrap();
++        assert_eq!(decoded.models.len(), 1);
++        assert_eq!(decoded.models[0].model_id, "local-model-hash");
++    }
++
++    #[tokio::test]
++    async fn ordinary_byok_keeps_the_upstream_catalogue() {
++        let local = AvailableModelsAddition { model_names: vec!["local".into()], models: vec![] }.encode_to_vec();
++        let response = catalog_response(local, None, async {
++            Ok(proxy::BufferedResponse { status: StatusCode::OK, headers: Default::default(),
++                body: AvailableModelsAddition { model_names: vec!["official".into()], models: vec![] }.encode_to_vec().into() })
++        }).await.unwrap();
++        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let (_, payload) = unary_payload(&body).unwrap();
++        assert_eq!(AvailableModelsAddition::decode(payload).unwrap().model_names, vec!["official", "local"]);
++    }
++
+ }
+diff --git a/server/src/local_app/mod.rs b/server/src/local_app/mod.rs
+index 7c50336..0bf45f1 100644
+--- a/server/src/local_app/mod.rs
++++ b/server/src/local_app/mod.rs
+@@ -43,6 +43,13 @@ pub enum CaState {
+     Invalid,
+ }
+ 
++/// Prepare the standalone bridge CA without opening a database or touching Cursor.
++pub fn initialize_bridge_ca() -> Result<CaState> {
++    let ca = CaManager::managed()?;
++    ca.initialize_local()?;
++    ca.state()
++}
++
+ #[derive(Clone, Debug, Serialize)]
+ #[serde(rename_all = "snake_case")]
+ pub enum IntegrationState {
+@@ -100,6 +107,24 @@ impl CursorHarness {
+         *self.inner.backend_addr.write() = Some(addr);
+     }
+ 
++    /// Run only the loopback proxy. The caller owns settings and process lifecycle.
++    pub async fn start_proxy_only(&self) -> Result<String> {
++        if !matches!(self.inner.ca.state()?, CaState::Ready) {
++            return Err(Error::Config("bridge requires an already trusted CA".into()));
++        }
++        let backend = self.inner.backend_addr.read()
++            .ok_or_else(|| Error::Config("bridge backend is not ready".into()))?;
++        let mut proxy = self.inner.proxy.lock().await;
++        if let Some(url) = proxy.url() { return Ok(url); }
++        *self.inner.tab_mode.write() = TabMode::Direct;
++        let (url, _) = proxy.start(backend, self.inner.ca.load()?, 0, self.inner.tab_mode.clone()).await?;
++        Ok(url)
++    }
++
++    pub async fn stop_proxy_only(&self) {
++        self.inner.proxy.lock().await.stop().await;
++    }
++
+     pub async fn proxy_port(&self) -> Option<u16> {
+         self.inner.proxy.lock().await.port()
+     }
+diff --git a/server/src/store/models.rs b/server/src/store/models.rs
+index 6d29d3c..f47ac3e 100644
+--- a/server/src/store/models.rs
++++ b/server/src/store/models.rs
+@@ -20,6 +20,28 @@ const MODEL_COLUMNS: &str = r#"
+ "#;
+ 
+ impl Store {
++    /// Replace the catalogue in the dedicated bridge database atomically.
++    pub async fn replace_bridge_models(&self, inputs: &[ModelConfigInput]) -> Result<()> {
++        if inputs.is_empty() { return Err(Error::Config("empty bridge catalogue".into())); }
++        let mut hashes = HashSet::new();
++        let mut normalized = Vec::new();
++        for input in inputs {
++            let input = normalize_model_input(input)?;
++            let hash = model_hash(&input)?;
++            if !hashes.insert(hash.clone()) { return Err(Error::Config("duplicate bridge model".into())); }
++            normalized.push((hash, input));
++        }
++        let _write = self.writes.lock().await;
++        let mut transaction = self.pool.begin().await?;
++        // Calls keep their request/response bodies; removing a catalogue must not violate FK constraints.
++        sqlx::query("UPDATE llm_calls SET model_hash = NULL").execute(&mut *transaction).await?;
++        sqlx::query("DELETE FROM model_configs").execute(&mut *transaction).await?;
++        let now = now_ms();
++        for (hash, input) in normalized { insert_model(&mut transaction, &hash, &input, now).await?; }
++        transaction.commit().await?;
++        Ok(())
++    }
++
+     pub async fn models(&self) -> Result<Vec<ModelConfig>> {
+         let query =
+             format!("SELECT {MODEL_COLUMNS} FROM model_configs ORDER BY sort_order, display_name");
+diff --git a/server/src/bin/cursor-magpie-bridge.rs b/server/src/bin/cursor-magpie-bridge.rs
+new file mode 100644
+index 0000000..cc29258
+--- /dev/null
++++ b/server/src/bin/cursor-magpie-bridge.rs
+@@ -0,0 +1,147 @@
++//! Headless Cursor protocol bridge. No desktop/account writes or management API.
++use std::{path::PathBuf, sync::Arc, time::Duration};
++use cursor_server::{api, config, cursor::{prompting::{PromptAssets, PromptCompiler}, transport::TransportRegistry}, local_app::CursorHarness, model::ModelConfigInput, network::NetworkClients, plugin::{PluginRegistry, PluginRuntime}, provider::ProviderRouter, search::WebCache, store::Store};
++use serde::Deserialize;
++use serde_json::json;
++use tokio_util::sync::CancellationToken;
++
++#[derive(Deserialize)]
++struct Connection { gateway: String, key: String, model: String, models: Vec<BridgeModel> }
++#[derive(Deserialize)]
++struct BridgeModel { id: String, #[serde(default)] name: String, context: Option<u64> }
++
++fn catalogue(bytes: &[u8]) -> Result<Vec<ModelConfigInput>, Box<dyn std::error::Error>> {
++    let c: Connection = serde_json::from_slice(bytes)?;
++    let url = url::Url::parse(&c.gateway)?;
++    if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
++        return Err("only a loopback Magpie gateway is supported".into());
++    }
++    if c.key.trim().is_empty() || !c.models.iter().any(|m| m.id == c.model) { return Err("missing gateway key or selected model".into()); }
++    let mut models = c.models;
++    models.sort_by_key(|m| m.id != c.model);
++    let mut seen = std::collections::HashSet::new();
++    models.into_iter().enumerate().map(|(i,m)| {
++        if !seen.insert(m.id.clone()) { return Err("duplicate model id".into()); }
++        Ok(serde_json::from_value(json!({
++            "sort_order": i, "display_name": if m.name.is_empty() {m.id.clone()} else {format!("{} · {}", m.name, m.id)},
++            "group_name":"Magpie", "type":"openai", "base_url": c.gateway.trim_end_matches('/'),
++            "api_key":c.key, "tooltip_data":format!("Magpie / {}",m.id), "model_id":m.id,
++            "context_window_tokens":m.context.filter(|v| *v > 0),
++            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.0"}
++        }))?)
++    }).collect()
++}
++
++#[tokio::main]
++async fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let argument = std::env::args().nth(1);
++    if argument.as_deref() == Some("--version") {
++        println!("0.2.0");
++        return Ok(());
++    }
++    if argument.as_deref() == Some("--help") || argument.is_none() {
++        println!("cursor-magpie-bridge 0.2.0\nUsage: cursor-magpie-bridge --init-ca | CONNECTION.json\nRequires CURSOR_BYOK_DATA_DIR (absolute path). --init-ca never modifies certificate trust.");
++        return Ok(());
++    }
++    // A dedicated directory is mandatory: never open the desktop BYOK database.
++    if std::env::var_os("CURSOR_BYOK_DATA_DIR").is_none() { return Err("CURSOR_BYOK_DATA_DIR is required".into()); }
++    if argument.as_deref() == Some("--init-ca") {
++        let state = cursor_server::local_app::initialize_bridge_ca()?;
++        println!("{}", json!({"ca":state, "certificate":config::managed_data_dir()?.join("ca/ca.crt")}));
++        return Ok(());
++    }
++    let path = PathBuf::from(argument.unwrap());
++    let mut contents = tokio::fs::read(&path).await?;
++    let inputs = catalogue(&contents)?;
++    let root = config::managed_data_dir()?;
++    let store = Store::connect(&format!("sqlite://{}",root.join("bridge.db").display())).await?;
++    store.replace_bridge_models(&inputs).await?;
++    let plugins = PluginRegistry::managed(store.clone(), PluginRuntime::managed()?, "1.0.1".into())?;
++    let clients = NetworkClients::new(store.clone());
++    let provider = Arc::new(ProviderRouter::new(store.clone(),plugins.clone(),clients.clone(),Duration::from_secs(3600),Duration::from_secs(1800)));
++    let registry = TransportRegistry::with_plugins(store.clone(),provider,PromptCompiler::new(PromptAssets::embedded()?),WebCache::managed()?,plugins,root.join("rules"));
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++    let address = listener.local_addr()?;
++    registry.web_cache().set_service_addr(address);
++    let router = api::router(registry.clone(),clients)?
++        .layer(axum::Extension(cursor_server::cursor::services::model_catalog::LocalCatalogOnly));
++    let harness = CursorHarness::new(store.clone())?;
++    harness.set_backend_addr(address);
++    let proxy = harness.start_proxy_only().await?;
++    let shutdown = CancellationToken::new();
++    let cancel = shutdown.clone();
++    let server = tokio::spawn(async move { axum::serve(listener,router).with_graceful_shutdown(async move {cancel.cancelled().await}).await });
++    println!("{}",json!({"event":"ready","proxy":proxy,"backend":format!("http://{address}"),"models":inputs.len()}));
++    // The supervisor owns stdin. Its death must not leave an orphan TLS proxy.
++    let parent_closed = CancellationToken::new();
++    let parent_signal = parent_closed.clone();
++    std::thread::spawn(move || {
++        use std::io::Read;
++        let mut buf = [0u8; 64];
++        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
++        parent_signal.cancel();
++    });
++    let mut interval = tokio::time::interval(Duration::from_secs(2));
++    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
++    loop {
++        tokio::select! {
++            _ = tokio::signal::ctrl_c() => break,
++            _ = sigterm.recv() => break,
++            _ = parent_closed.cancelled() => break,
++            _ = interval.tick() => {
++                if server.is_finished() { break; }
++                match tokio::fs::read(&path).await {
++                    Ok(next) if next != contents => match catalogue(&next) {
++                        Ok(inputs) => {
++                            if store.replace_bridge_models(&inputs).await.is_ok() {
++                                contents = next;
++                                println!("{}",json!({"event":"catalogue","models":inputs.len()}));
++                            } else { eprintln!("catalogue update failed; retaining last complete catalogue"); }
++                        }
++                        Err(_) => eprintln!("invalid catalogue; retaining last complete catalogue"),
++                    },
++                    _ => {},
++                }
++            }
++        }
++    }
++    harness.stop_proxy_only().await;
++    registry.shutdown().await;
++    shutdown.cancel();
++    let _ = tokio::time::timeout(Duration::from_secs(10),server).await;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn config() -> serde_json::Value { json!({"gateway":"http://127.0.0.1:3425/v1","key":"test-only","model":"p/b","models":[{"id":"p/a","name":"A","context":200000},{"id":"p/b","name":"B"}]}) }
++    #[test]
++    fn selected_model_first_and_route_preserved() {
++        let models=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap();
++        assert_eq!(models[0].model_id,"p/b");
++        assert_eq!(models[1].context_window_tokens,Some(200000));
++        assert_eq!(models[0].base_url,"http://127.0.0.1:3425/v1");
++        assert_eq!(models[0].api_key,"test-only");
++    }
++    #[test]
++    fn rejects_remote_and_duplicate_models() {
++        let mut c=config();c["gateway"]=json!("http://evil.example/v1");assert!(catalogue(&serde_json::to_vec(&c).unwrap()).is_err());
++        let mut c=config();c["models"]=json!([{"id":"p/b"},{"id":"p/b"}]);assert!(catalogue(&serde_json::to_vec(&c).unwrap()).is_err());
++    }
++    #[tokio::test]
++    async fn catalogue_update_is_atomic_and_retains_last_valid_models() {
++        let dir=tempfile::tempdir().unwrap();
++        let store=Store::connect(&format!("sqlite://{}",dir.path().join("test.db").display())).await.unwrap();
++        let inputs=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap();
++        store.replace_bridge_models(&inputs).await.unwrap();
++        let duplicate=vec![inputs[0].clone(),inputs[0].clone()];
++        assert!(store.replace_bridge_models(&duplicate).await.is_err());
++        assert_eq!(store.models().await.unwrap().len(),2);
++        let mut invalid=inputs.clone();invalid[1].api_key="".into();
++        assert!(store.replace_bridge_models(&invalid).await.is_err());
++        assert_eq!(store.models().await.unwrap().len(),2);
++        store.replace_bridge_models(&inputs[..1]).await.unwrap();
++        assert_eq!(store.models().await.unwrap().len(),1);
++    }
++}
+diff --git a/server/examples/magpie_smoke.rs b/server/examples/magpie_smoke.rs
+new file mode 100644
+index 0000000..9590ae9
+--- /dev/null
++++ b/server/examples/magpie_smoke.rs
+@@ -0,0 +1,48 @@
++//! Explicit live smoke test: args are proxy URL and catalogue model hash.
++use cursor_server::cursor::protocol::{connect,proto::{agent::v1 as pb,aiserver::v1 as ai}};
++use prost::Message;
++use futures_util::StreamExt;
++use std::time::Duration;
++async fn append(client:&reqwest::Client,id:&str,seq:i64,message:pb::AgentClientMessage) -> Result<(),Box<dyn std::error::Error>> {
++ let body=ai::BidiAppendRequest{data:hex::encode(message.encode_to_vec()),request_id:Some(ai::BidiRequestId{request_id:id.into()}),append_seqno:seq,..Default::default()};
++ let r=client.post("https://api2.cursor.sh/aiserver.v1.BidiService/BidiAppend").header("Content-Type","application/proto").body(body.encode_to_vec()).send().await?;
++ if !r.status().is_success(){return Err(format!("append {}: {}",r.status(),r.text().await?).into());} Ok(())
++}
++#[tokio::main]
++async fn main()->Result<(),Box<dyn std::error::Error>>{
++ let args:Vec<_>=std::env::args().collect();
++ let client=reqwest::Client::builder().proxy(reqwest::Proxy::all(&args[1])?).timeout(Duration::from_secs(120)).build()?;
++ let id=format!("bridge-smoke-{}",uuid::Uuid::new_v4());
++ let message=pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::RunRequest(pb::AgentRunRequest{
++ action:Some(pb::ConversationAction{action:Some(pb::conversation_action::Action::UserMessageAction(pb::UserMessageAction{user_message:Some(pb::UserMessage{text:"Reply with exactly MAGPIE_BRIDGE_OK. Do not call any tools.".into(),message_id:format!("{id}-user"),mode:pb::AgentMode::Agent as i32,..Default::default()}),..Default::default()})),..Default::default()}),
++ conversation_id:Some(id.clone()),run_id:Some(id.clone()),requested_model:Some(pb::RequestedModel{model_id:args[2].clone(),..Default::default()}),..Default::default()}))};
++ append(&client,&id,0,message).await?;
++ let response=client.post("https://api2.cursor.sh/agent.v1.AgentService/RunSSE").header("Content-Type","application/proto").body(pb::BidiRequestId{request_id:id.clone()}.encode_to_vec()).send().await?.error_for_status()?;
++ let mut stream=response.bytes_stream();let mut buffer=Vec::new();let mut seq=1;let mut text=String::new();
++ while let Some(chunk)=stream.next().await {
++  buffer.extend_from_slice(&chunk?);
++  while buffer.len()>=5 {
++   let len=u32::from_be_bytes(buffer[1..5].try_into()?) as usize;
++   if buffer.len()<len+5 {break;}
++   let frame:Vec<_>=buffer.drain(..len+5).collect();
++   if frame[0]&connect::END_STREAM_FLAG!=0 {
++    let end:serde_json::Value=serde_json::from_slice(&frame[5..])?;
++    if end.get("error").is_some(){return Err(format!("stream error: {end}").into());}
++    if !text.contains("MAGPIE_BRIDGE_OK"){return Err(format!("unexpected response: {text}").into());}
++    println!("TLS proxy -> Cursor Bidi/RunSSE -> Magpie -> model -> Cursor stream: {text}");return Ok(());
++   }
++   let server=pb::AgentServerMessage::decode(&frame[5..])?;
++   let reply=match server.message {
++    Some(pb::agent_server_message::Message::InteractionUpdate(u))=>{if let Some(pb::interaction_update::Message::TextDelta(t))=u.message{text.push_str(&t.text);}None},
++    Some(pb::agent_server_message::Message::KvServerMessage(kv))=>Some(pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::KvClientMessage(pb::KvClientMessage{id:kv.id,message:Some(pb::kv_client_message::Message::SetBlobResult(pb::SetBlobResult{error:None}))}))}),
++    Some(pb::agent_server_message::Message::ExecServerMessage(exec))=>{
++      if !matches!(exec.message,Some(pb::exec_server_message::Message::RequestContextArgs(_))){return Err("model requested an unexpected tool".into());}
++      append(&client,&id,seq,pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::ExecClientControlMessage(pb::ExecClientControlMessage{message:Some(pb::exec_client_control_message::Message::StreamClose(pb::ExecClientStreamClose{id:exec.id}))}))}).await?;seq+=1;
++      Some(pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::ExecClientMessage(pb::ExecClientMessage{id:exec.id,message:Some(pb::exec_client_message::Message::RequestContextResult(pb::RequestContextResult{result:Some(pb::request_context_result::Result::Success(pb::RequestContextSuccess{request_context:Some(pb::RequestContext::default()),..Default::default()}))})),..Default::default()}))})
++    },_=>None
++   };
++   if let Some(reply)=reply{append(&client,&id,seq,reply).await?;seq+=1;}
++  }
++ }
++ Err("stream closed before successful end".into())
++}

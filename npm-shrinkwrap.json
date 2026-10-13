@@ -1,0 +1,32 @@
+{
+  "name": "magpie-agent-cursor-bridge",
+  "version": "0.2.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "magpie-agent-cursor-bridge",
+      "version": "0.2.0",
+      "bundleDependencies": [
+        "jsonc-parser"
+      ],
+      "cpu": [
+        "arm64"
+      ],
+      "license": "MIT",
+      "os": [
+        "darwin"
+      ],
+      "dependencies": {
+        "jsonc-parser": "3.3.1"
+      }
+    },
+    "node_modules/jsonc-parser": {
+      "version": "3.3.1",
+      "resolved": "https://registry.npmjs.org/jsonc-parser/-/jsonc-parser-3.3.1.tgz",
+      "integrity": "sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==",
+      "inBundle": true,
+      "license": "MIT"
+    }
+  }
+}

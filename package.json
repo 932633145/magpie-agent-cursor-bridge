@@ -1,0 +1,59 @@
+{
+  "name": "magpie-agent-cursor-bridge",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Cursor protocol bridge backed by Magpie",
+  "license": "MIT",
+  "magpie": {
+    "agent": "./agent.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "status": "bash setup.command status",
+    "setup": "bash setup.command",
+    "uninstall": "bash setup.command uninstall"
+  },
+  "dependencies": {
+    "jsonc-parser": "3.3.1"
+  },
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "agent.js",
+    "bridge.js",
+    "install.js",
+    "setup.command",
+    "lib",
+    "bin/cursor-magpie-bridge",
+    "integrity.json",
+    "source.patch",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+    "CHANGELOG.md",
+    "npm-shrinkwrap.json",
+    "scripts",
+    "test"
+  ],
+  "bundleDependencies": [
+    "jsonc-parser"
+  ],
+  "keywords": [
+    "magpie",
+    "magpie-agent",
+    "cursor",
+    "byok"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nodlles/magpie-agent-cursor-bridge.git"
+  },
+  "homepage": "https://github.com/nodlles/magpie-agent-cursor-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/nodlles/magpie-agent-cursor-bridge/issues"
+  }
+}
