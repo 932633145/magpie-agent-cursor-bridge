@@ -25,10 +25,60 @@ index d2a9810..18bacc6 100644
      #[cfg(unix)]
      fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
 diff --git a/server/src/cursor/services/model_catalog.rs b/server/src/cursor/services/model_catalog.rs
-index b9dbd08..206e6a9 100644
+index b9dbd08..209b430 100644
 --- a/server/src/cursor/services/model_catalog.rs
 +++ b/server/src/cursor/services/model_catalog.rs
-@@ -246,9 +246,14 @@ fn context_options(context_window_tokens: Option<u64>) -> Vec<(String, String)>
+@@ -21,6 +21,49 @@ struct AvailableModelsAddition {
+     model_names: Vec<String>,
+     #[prost(message, repeated, tag = "2")]
+     models: Vec<AvailableModel>,
++    #[prost(message, optional, tag = "15")]
++    display_configuration: Option<ModelPickerDisplayConfiguration>,
++}
++
++#[derive(Clone, PartialEq, Message)]
++struct ModelPickerDisplayConfiguration {
++    #[prost(message, optional, tag = "1")]
++    routed_model_view_config: Option<RoutedModelViewConfig>,
++    #[prost(message, optional, tag = "2")]
++    named_models_view_config: Option<NamedModelsViewConfig>,
++}
++
++#[derive(Clone, PartialEq, Message)]
++struct RoutedModelViewConfig {
++    #[prost(bool, optional, tag = "5")]
++    hide_routed_model_view: Option<bool>,
++}
++
++#[derive(Clone, PartialEq, Message)]
++struct NamedModelsViewConfig {
++    #[prost(message, optional, tag = "3")]
++    named_view_to_routed_model_view_no_button: Option<NoAutoButton>,
++}
++
++#[derive(Clone, PartialEq, Message)]
++struct NoAutoButton {}
++
++impl AvailableModelsAddition {
++    fn with_local_picker(mut self, local_only: bool) -> Self {
++        if local_only {
++            // Cursor otherwise supplies its built-in Auto display configuration.
++            // Explicit NoButton also clears a previously cached Auto toggle/button.
++            self.display_configuration = Some(ModelPickerDisplayConfiguration {
++                routed_model_view_config: Some(RoutedModelViewConfig {
++                    hide_routed_model_view: Some(true),
++                }),
++                named_models_view_config: Some(NamedModelsViewConfig {
++                    named_view_to_routed_model_view_no_button: Some(NoAutoButton {}),
++                }),
++            });
++        }
++        self
++    }
+ }
+ 
+ #[derive(Clone, PartialEq, Message)]
+@@ -246,9 +289,14 @@ fn context_options(context_window_tokens: Option<u64>) -> Vec<(String, String)>
      contexts
  }
  
@@ -43,9 +93,13 @@ index b9dbd08..206e6a9 100644
      request: Request<Body>,
  ) -> Result<Response<Body>> {
      let models = registry.store().models().await?;
-@@ -272,18 +277,13 @@ pub async fn available_models(
+@@ -270,20 +318,17 @@ pub async fn available_models(
+             .chain(plugin_models.iter().map(|model| model.id.clone()))
+             .collect(),
          models: available_models,
++        ..Default::default()
      }
++    .with_local_picker(local_only.is_some())
      .encode_to_vec();
 -    match proxy::forward_buffered(&proxy, request).await {
 -        Ok(upstream) => merge_response(upstream, local),
@@ -64,7 +118,7 @@ index b9dbd08..206e6a9 100644
      request: Request<Body>,
  ) -> Result<Response<Body>> {
      let models = registry.store().models().await?;
-@@ -304,13 +304,7 @@ pub async fn usable_models(
+@@ -304,13 +349,7 @@ pub async fn usable_models(
              .collect(),
      }
      .encode_to_vec();
@@ -79,7 +133,7 @@ index b9dbd08..206e6a9 100644
  }
  
  pub async fn default_model_for_cli(
-@@ -401,6 +395,23 @@ fn default_model_nudge_response(
+@@ -401,6 +440,23 @@ fn default_model_nudge_response(
      }
  }
  
@@ -103,7 +157,25 @@ index b9dbd08..206e6a9 100644
  fn merge_response(upstream: proxy::BufferedResponse, extra: Vec<u8>) -> Result<Response<Body>> {
      if !upstream.status.is_success() {
          tracing::warn!(status = %upstream.status, "Cursor model catalog upstream rejected request; using local catalog");
-@@ -859,4 +870,58 @@ mod tests {
+@@ -802,6 +858,17 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn bridge_picker_hides_auto_using_cursor_wire_fields() {
++        let bridge = AvailableModelsAddition::default().with_local_picker(true);
++        // AvailableModels field 15 -> routed field 1 / hide field 5;
++        // named field 2 / NoButton field 3. Empty NoButton must stay present.
++        assert_eq!(bridge.encode_to_vec(), [0x7a, 8, 0x0a, 2, 0x28, 1, 0x12, 2, 0x1a, 0]);
++        let decoded = AvailableModelsAddition::decode(bridge.encode_to_vec().as_slice()).unwrap();
++        assert!(decoded.display_configuration.is_some());
++        assert!(AvailableModelsAddition::default().with_local_picker(false).encode_to_vec().is_empty());
++    }
++
+     #[test]
+     fn cli_model_details_use_local_routing_credentials() {
+         let details = usable_model(&model());
+@@ -859,4 +926,60 @@ mod tests {
              vec!["local-model-hash"]
          );
      }
@@ -114,7 +186,8 @@ index b9dbd08..206e6a9 100644
 +        let local = AvailableModelsAddition {
 +            model_names: vec!["local-model-hash".into()],
 +            models: vec![available_model(&model())],
-+        }.encode_to_vec();
++            ..Default::default()
++        }.with_local_picker(true).encode_to_vec();
 +        let upstream = async {
 +            polled.store(true, Ordering::SeqCst);
 +            Ok(proxy::BufferedResponse {
@@ -123,6 +196,7 @@ index b9dbd08..206e6a9 100644
 +                body: AvailableModelsAddition {
 +                    model_names: vec!["cursor-grok-4.7-high-fast".into(), "cursor-grok-4.6-high-fast".into()],
 +                    models: vec![],
++                    ..Default::default()
 +                }.encode_to_vec().into(),
 +            })
 +        };
@@ -151,10 +225,10 @@ index b9dbd08..206e6a9 100644
 +
 +    #[tokio::test]
 +    async fn ordinary_byok_keeps_the_upstream_catalogue() {
-+        let local = AvailableModelsAddition { model_names: vec!["local".into()], models: vec![] }.encode_to_vec();
++        let local = AvailableModelsAddition { model_names: vec!["local".into()], models: vec![], ..Default::default() }.encode_to_vec();
 +        let response = catalog_response(local, None, async {
 +            Ok(proxy::BufferedResponse { status: StatusCode::OK, headers: Default::default(),
-+                body: AvailableModelsAddition { model_names: vec!["official".into()], models: vec![] }.encode_to_vec().into() })
++                body: AvailableModelsAddition { model_names: vec!["official".into()], models: vec![], ..Default::default() }.encode_to_vec().into() })
 +        }).await.unwrap();
 +        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
 +        let (_, payload) = unary_payload(&body).unwrap();
@@ -240,7 +314,7 @@ index 6d29d3c..f47ac3e 100644
              format!("SELECT {MODEL_COLUMNS} FROM model_configs ORDER BY sort_order, display_name");
 diff --git a/server/src/bin/cursor-magpie-bridge.rs b/server/src/bin/cursor-magpie-bridge.rs
 new file mode 100644
-index 0000000..cc29258
+index 0000000..2a625b6
 --- /dev/null
 +++ b/server/src/bin/cursor-magpie-bridge.rs
 @@ -0,0 +1,147 @@
@@ -273,7 +347,7 @@ index 0000000..cc29258
 +            "group_name":"Magpie", "type":"openai", "base_url": c.gateway.trim_end_matches('/'),
 +            "api_key":c.key, "tooltip_data":format!("Magpie / {}",m.id), "model_id":m.id,
 +            "context_window_tokens":m.context.filter(|v| *v > 0),
-+            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.0"}
++            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.1"}
 +        }))?)
 +    }).collect()
 +}
@@ -282,11 +356,11 @@ index 0000000..cc29258
 +async fn main() -> Result<(), Box<dyn std::error::Error>> {
 +    let argument = std::env::args().nth(1);
 +    if argument.as_deref() == Some("--version") {
-+        println!("0.2.0");
++        println!("0.2.1");
 +        return Ok(());
 +    }
 +    if argument.as_deref() == Some("--help") || argument.is_none() {
-+        println!("cursor-magpie-bridge 0.2.0\nUsage: cursor-magpie-bridge --init-ca | CONNECTION.json\nRequires CURSOR_BYOK_DATA_DIR (absolute path). --init-ca never modifies certificate trust.");
++        println!("cursor-magpie-bridge 0.2.1\nUsage: cursor-magpie-bridge --init-ca | CONNECTION.json\nRequires CURSOR_BYOK_DATA_DIR (absolute path). --init-ca never modifies certificate trust.");
 +        return Ok(());
 +    }
 +    // A dedicated directory is mandatory: never open the desktop BYOK database.

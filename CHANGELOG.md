@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1
+
+- Hide Cursor Auto in the bridge model picker using Cursor's display configuration, including clearing cached Auto controls. Magpie models and route groups remain selectable.
+
 ## 0.2.0
 
 - Standard Magpie Agent package with an explicit file allowlist and bundled JavaScript dependency.
