@@ -11,7 +11,11 @@ import {validate,gatewayModels} from './lib/config.js';
 const packageDir=path.dirname(fileURLToPath(import.meta.url));
 const version=JSON.parse(fs.readFileSync(path.join(packageDir,'package.json'),'utf8')).version;
 const root=process.env.CURSOR_BRIDGE_ROOT||path.join(os.homedir(),'.config/magpie-cursor-bridge');
-const settings=process.env.CURSOR_BRIDGE_SETTINGS||path.join(os.homedir(),'Library/Application Support/Cursor/User/settings.json');
+const defaultSettings=process.platform==='win32'
+  ? path.join(process.env.APPDATA||path.join(os.homedir(),'AppData/Roaming'),'Cursor/User/settings.json')
+  : path.join(os.homedir(),'Library/Application Support/Cursor/User/settings.json');
+const settings=process.env.CURSOR_BRIDGE_SETTINGS||defaultSettings;
+const engineBinary=path.join(packageDir,'bin',process.platform==='win32'?'cursor-magpie-bridge.exe':'cursor-magpie-bridge');
 const file=name=>path.join(root,name);
 let lastStatus='';
 const status=(state,extra={})=>{const signature=JSON.stringify({version,state,...extra});if(signature!==lastStatus){atomic(file('status.json'),JSON.stringify({version,state,...extra,updated:new Date().toISOString()},null,2));lastStatus=signature;}};
@@ -24,7 +28,7 @@ if(command==='status') {
   console.log(JSON.stringify({preservedExternalChanges:restoreProxy(file('settings-journal.json'))}));
 } else if(command==='supervise') {
   fs.mkdirSync(root,{recursive:true,mode:0o700});
-  process.umask(0o077);
+  if(typeof process.umask==='function'){try{process.umask(0o077);}catch{}}
   const lock=file('supervisor.lock');
   try {fs.mkdirSync(lock);} catch(error) {
     let live=false;
@@ -41,18 +45,22 @@ if(command==='status') {
       return restoreProxy(file('settings-journal.json'));
     } finally {
       if(old && old.exitCode===null && old.signalCode===null) {
-        old.kill('SIGTERM');
-        await Promise.race([new Promise(r=>old.once('exit',r)),wait(12000)]);
-        if(old.exitCode===null && old.signalCode===null) {
-          old.kill('SIGKILL');
-          await new Promise(r=>old.once('exit',r));
+        if(process.platform==='win32') {
+          try {spawn('taskkill',['/F','/T','/PID',String(old.pid)],{stdio:'ignore'});} catch {old.kill();}
+        } else {
+          old.kill('SIGTERM');
+          await Promise.race([new Promise(r=>old.once('exit',r)),wait(12000)]);
+          if(old.exitCode===null && old.signalCode===null) {
+            old.kill('SIGKILL');
+            await new Promise(r=>old.once('exit',r));
+          }
         }
       }
     }
   }
   async function start(c) {
     atomic(file('effective.json'),JSON.stringify(c));
-    const engine=spawn(path.join(packageDir,'bin/cursor-magpie-bridge'),[file('effective.json')],{
+    const engine=spawn(engineBinary,[file('effective.json')],{
       env:{...process.env,CURSOR_BYOK_DATA_DIR:file('data')},stdio:['pipe','pipe','pipe']
     });
     child=engine;
@@ -67,7 +75,8 @@ if(command==='status') {
     });
     applyProxy(settings,file('settings-journal.json'),ready.proxy);
   }
-  for(const signal of ['SIGTERM','SIGINT']) process.on(signal,()=>{ending=true;});
+  const signals=process.platform==='win32'?['SIGINT','SIGBREAK']:['SIGTERM','SIGINT'];
+  for(const signal of signals) process.on(signal,()=>{ending=true;});
   try {
     restoreProxy(file('settings-journal.json'));
     while(!ending) {

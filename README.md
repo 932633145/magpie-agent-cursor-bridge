@@ -1,96 +1,97 @@
 # Cursor · Magpie Bridge
 
-让普通版 Cursor 使用 Magpie 中配置的模型和路由组。模型菜单仅返回 Magpie 模型目录，并隐藏 Cursor Auto 入口，保留 Cursor 原有登录。当前版本 **0.2.1，仅支持 Apple Silicon macOS**，适配 Magpie 0.1.1220 和 Cursor 3.24.12。
+让 Cursor 编辑器直接使用 Magpie 中配置的全部模型与路由组。模型菜单返回 Magpie 模型目录，隐藏 Cursor 默认 Auto 入口，保留 Cursor 原有登录。
 
-升级后重启 Cursor 以刷新模型菜单。已有聊天若仍显示 Auto，请手动改选一次 Magpie 模型；此版本隐藏菜单入口，不改写已有聊天保存的模型选择。
+当前版本全面支持 **Windows (x64)** 与 **Apple Silicon / Intel macOS**。
 
-## 安装
+---
 
-需要先安装 Magpie 和 Cursor 到 `/Applications`，并在 Magpie 配置可用模型。无需安装 Cursor BYOK、Node 或 Rust。
+## 特性
 
-### 从 Magpie 插件页安装
+- **全平台支持**：针对 Windows 与 macOS 深度适配原生协议桥接核心，开箱即用。
+- **动态模型同步**：在 Magpie 中添加、切换或分组的模型，每 15 秒自动热同步至 Cursor 模型列表。
+- **无感代理接管**：连接时自动配置 Cursor 代理，断开连接或卸载时完整自动还原 Cursor 原有配置。
+- **安全与隐私**：所有 TLS 证书与回环代理均在本机生成，网络流量仅流经本机回环地址（`127.0.0.1`）至 Magpie 网关，不接触任何外部中转服务。
 
-在 Magpie → Plugins 添加以下固定版本地址：
+---
+
+## 安装与快速上手
+
+### 前置条件
+- 已在本机安装 **Cursor** 与 **Magpie**。
+- 已在 Magpie 中添加并配置好至少一个可用模型或路由组。
+
+---
+
+### Windows 系统使用步骤
+
+1. **运行初始化**：
+   在插件目录下打开 PowerShell 执行初始化脚本（或直接双击运行 `setup.cmd`）：
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\setup.ps1
+   ```
+   *注：首次初始化时会检查并提示信任本机生成的本地根证书（系统标准确认窗口选择“是”即可）。*
+
+2. **在 Magpie 中选择模型**：
+   - 打开 Magpie，在 **Agents** 页面找到 **Cursor · Magpie Bridge**。
+   - 打开开关，并从下拉列表中挑选您希望在 Cursor 中使用的模型或路由组。
+
+3. **重启 Cursor**：
+   - 完全关闭并重启 Cursor 编辑器。
+   - 打开对话面板，在底部模型选择列表中即可看到 Magpie 提供的模型，点击即可畅快对话。
+
+---
+
+### macOS 系统使用步骤
+
+1. **运行初始化**：
+   在终端中运行：
+   ```bash
+   bash setup.command
+   ```
+   *根据系统提示完成本地钥匙串证书信任授权。*
+
+2. **在 Magpie 中选择模型并重启 Cursor**：
+   - 在 Magpie → **Agents** 中开启 **Cursor · Magpie Bridge** 并选择模型。
+   - 重启 Cursor 即可生效。
+
+---
+
+## 常用管理命令
+
+| 操作 | Windows (PowerShell) | macOS / Linux (Bash) |
+| :--- | :--- | :--- |
+| **启动/更新服务** | `powershell -ExecutionPolicy Bypass -File setup.ps1` | `bash setup.command` |
+| **查看后台运行状态** | `powershell -ExecutionPolicy Bypass -File setup.ps1 status` | `bash setup.command status` |
+| **停用并卸载后台服务** | `powershell -ExecutionPolicy Bypass -File setup.ps1 uninstall` | `bash setup.command uninstall` |
+
+- **断开连接**：在 Magpie 的 Agents 页面选择 Disconnect，或在终端执行 `magpie cursor-bridge default`。
+- **代理自愈与还原**：当桥接服务退出或在 Magpie 中断开连接时，Cursor 的代理配置会自动恢复为初始状态。
+
+---
+
+## 架构与工作流程
 
 ```text
-github:nodlles/magpie-agent-cursor-bridge#v0.2.1
+Magpie Agent 插件 → 写入私有连接配置 (connection.json)
+                                ↓
+                      后台监视器 (Supervisor)
+                      ├─ 启停原生桥接引擎 (cursor-magpie-bridge)
+                      └─ 自动维护/还原 Cursor 代理设置 (settings.json)
+                                ↓
+Cursor 编辑器 ──[本地 TLS 回环代理]──> 原生桥接服务 ──[OpenAI 协议兼容]──> 本地 Magpie 网关 ──> 大模型提供商
 ```
 
-[项目主页](https://github.com/nodlles/magpie-agent-cursor-bridge) · [v0.2.1 发布页与安装包](https://github.com/nodlles/magpie-agent-cursor-bridge/releases/tag/v0.2.1)
+- **配置与数据隔离目录**：
+  - Windows: `%USERPROFILE%\.config\magpie-cursor-bridge\`
+  - macOS: `~/.config/magpie-cursor-bridge/`
+- **运行产物与自启**：
+  - Windows: 自启通过当前用户 Startup 目录无窗口后台执行。
+  - macOS: 通过 `launchd` 用户 LaunchAgent 守护。
 
-此版本通过 GitHub 发布；无需从其他机器复制配置，也无需 npm 账号。
+---
 
-安装后，在终端运行一次：
+## 开源协议
 
-```sh
-bash "$HOME/.config/magpie/plugins/node_modules/magpie-agent-cursor-bridge/setup.command"
-```
-
-如果设置了 `XDG_CONFIG_HOME`，请相应替换 `.config` 路径。初始化会复用 Magpie 下载的 Bun，无需另装 Node；便携安装可用 `MAGPIE_BUN` 指定 Magpie 的 Bun 路径。
-
-### 从 ZIP 安装
-
-[下载 Apple Silicon macOS 安装包](https://github.com/nodlles/magpie-agent-cursor-bridge/releases/download/v0.2.1/magpie-agent-cursor-bridge-0.2.1-macos-arm64.zip)，解压后在终端输入 `bash `，把包内 `setup.command` 拖进终端，回车。它会自动把插件注册到 Magpie。首次使用 Magpie、尚无 Bun 时，先在 Magpie → Plugins 添加解压后的插件文件夹，再运行初始化。
-
-初始化会在本机生成独立证书，并请求 macOS 信任（可能需要确认或密码）。证书名称沿用上游的 `Cursor BYOK Local CA`。证书和私钥仅存在本机，安装包不会携带。已有桥接证书会被保留；取消授权后可重新运行初始化。
-
-完成后，在 Magpie → Agents 选择 **Cursor · Magpie Bridge** 和模型，首次连接后重启 Cursor。请勿同时开启原 Cursor BYOK 接管。
-
-## 使用和更新
-
-- 在 Cursor 模型菜单切换 Magpie 模型；Magpie 中选中的模型优先排列。
-- 模型目录每 15 秒同步一次，新增模型后 Cursor 菜单可能需要刷新。
-- 断开：Magpie 中选择 Disconnect，或运行 `magpie cursor-bridge default`。
-- 状态：`bash setup.command status`，输出后台实际运行版本和连接状态。
-- 更新：在 Magpie 更新插件后，**再运行一次上述初始化命令**，使后台切换到配套版本。只更新 Agent 文件不会替换正在运行的后台。ZIP 用户下载新版并运行其初始化。
-- 停用并卸载后台：`bash setup.command uninstall`。从插件页安装的版本还需在 Magpie 中移除该插件。
-
-卸载会还原 Cursor 代理，保留证书、数据和恢复记录。它不会删除可能与旧 Cursor BYOK 共用的受信任证书。安装和卸载不会强制退出 Cursor；代理变化后若 Cursor 保留旧连接，请自行重启。
-
-## 后台和隐私
-
-```text
-Magpie Agent 插件 → 专用连接配置 → 后台监视器
-                                     ├─ 启停原生桥接
-                                     └─ 备份/还原 Cursor 代理
-Cursor → 本机 TLS 代理 → Cursor 协议与工具循环 → Magpie 网关 → 配置的模型
-```
-
-Agent 插件不能自行启动后台，且 Magpie 安装插件时禁用安装脚本，所以初始化是一个明确的独立步骤。后台随用户登录启动，断开时仅保留监视器；Magpie 网关不可用时恢复 Cursor 代理并停止原生桥接。桥接监听本机回环地址，只对 Cursor 域名进行协议转换；使用 Agent 网关密钥，不复制模型提供商密钥。
-
-```text
-~/.local/share/magpie-cursor-bridge/
-  agent.js、package.json       # ZIP 安装的稳定插件入口
-  releases/版本-编号/         # 完整后台和本机复制的运行环境
-~/.config/magpie-cursor-bridge/
-  connection.json            # Magpie 写入的私有连接配置
-  installation.json          # 当前安装版本与位置
-  settings-journal.json      # Cursor 代理恢复记录（连接时存在）
-  data/ca/                   # 本机证书与私钥
-  data/bridge.db             # 独立数据库，会存储会话和调用记录
-```
-
-后台使用完整版本目录，先准备新版本，再停止旧版并切换；启动注册失败时恢复旧后台。Bun 只在本机复制，避免 Magpie 清理缓存后后台无法启动，下载包不额外捆绑运行环境。旧版本目录保留，安装程序不自动清理用户数据。
-
-代理恢复保留无关用户修改；手动改动代理时暂停接管；设置文件损坏时保留恢复记录。监视器异常退出后，原生桥接会随之退出，macOS 重启监视器并恢复设置。
-
-当前只验证了单个 macOS 用户、标准 `/Applications` 安装。普通 Cursor 仍需已有可用登录；Tab 补全沿用原路径。不同模型的工具和图片能力取决于提供方；Cursor 协议升级可能需要配套更新。此构建未做 Apple Developer ID 签名或公证，其他机器可能需要在 macOS“隐私与安全性”中允许运行。
-
-## 开发
-
-JavaScript 依赖固定为 `jsonc-parser@3.3.1`，通过 npm `bundleDependencies` 随发布包分发。无 `postinstall` 等自动执行脚本。
-
-```sh
-npm ci --ignore-scripts
-npm test
-bash scripts/build-native.sh
-npm pack --ignore-scripts
-```
-
-原生构建需要 Git、Rust/Cargo 和 Python 3。脚本克隆固定上游提交、应用 `source.patch`，默认最多两个编译任务，并写入程序摘要。安装时验证摘要及程序报告的版本。
-
-`npm test` 使用临时目录验证独立 CA、版本配对、初始化授权流程、升级回退和设置恢复，不修改钥匙串或真实 Cursor 设置。证书信任提示通过模拟系统命令验证，仍需在目标机器完成首次 macOS 授权。
-
-已有正常连接时，可显式运行 `bun test/manual-lifecycle.mjs`（或 Node），用临时设置验证原生启停、模型切换、网关故障和崩溃恢复；它会读取已有连接和证书，不生成模型请求。
-
-原生核心来自 [leookun/cursor-byok v1.0.1](https://github.com/leookun/cursor-byok/tree/v1.0.1)，MIT，固定提交 `2068ab20513288e6a0289d33febe872a30608610`。第三方说明见 `THIRD_PARTY_NOTICES.md`。
+本项目核心遵循 [MIT License](LICENSE)。
+部分原生协议核心来源于开源项目 cursor-byok（MIT License）。
