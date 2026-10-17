@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {createRequire} from 'node:module';
 import {createHash, X509Certificate} from 'node:crypto';
-import {paths,verifyPackage,initializeCertificate,stage,activate,plistText} from '../lib/install.js';
+import {paths,verifyPackage,initializeCertificate,stage,activate,plistText,label} from '../lib/install.js';
 
 const isWin = process.platform === 'win32';
 const source=fileURLToPath(new URL('..',import.meta.url));
@@ -83,6 +83,8 @@ test('complete staging never overwrites an existing running release',t=>{
 test('failed activation restores previous launch configuration and restarts previous release',{timeout:15000},async t=>{
  if (isWin) {
    const p=paths(temp(t));
+   // Never touch the real Startup folder from a test; Windows can lock it mid-run.
+   p.startupScript=path.join(p.home,'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup',`${label}.vbs`);
    const release=stage(source,p,'0.2.1',process.execPath);
    let ran=false;
    const exec=(cmd,args)=>{if(cmd==='wscript.exe') ran=true; return {status:0};};
