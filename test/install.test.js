@@ -6,7 +6,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {createRequire} from 'node:module';
-import {createHash, X509Certificate} from 'node:crypto';
+import {createHash} from 'node:crypto';
 import {paths,verifyPackage,initializeCertificate,stage,activate,plistText,label} from '../lib/install.js';
 
 const isWin = process.platform === 'win32';
@@ -33,27 +33,24 @@ test('fresh machines generate distinct CAs without a BYOK install, database or t
 
 test('package and native engine have the same pinned version and digest',()=>{assert.equal(verifyPackage(source).version,'0.2.1');});
 
-test('certificate trust uses platform policy and argument arrays, and refuses failed authorization',t=>{
+test('certificate trust follows the engine verdict and refuses failed authorization',t=>{
  const p=paths(temp(t)),calls=[];let trusted=false;
  if (isWin) {
+   // The engine answers with its own CA verdict, so the trust check is never a
+   // certutil listing that could match an older root with the same name.
    const exec=(cmd,args,options)=>{
      calls.push({cmd,args,options});
-     if(args[0]==='--init-ca') {
-       const real=spawnSync(engine,['--init-ca'],{encoding:'utf8',env:{...process.env,CURSOR_BYOK_DATA_DIR:path.join(p.root,'data')}});
-       return {status:0,stdout:real.stdout||'{"ca":"untrusted"}'};
-     }
-     if(cmd==='certutil' && args.includes('-addstore')) {trusted=true;return {status:0,stdout:''};}
-     if(cmd==='certutil' && args.includes('-store')) {
-       const file=path.join(p.root,'data/ca/ca.crt');
-       const text=trusted && fs.existsSync(file) ? new X509Certificate(fs.readFileSync(file)).fingerprint : 'aa bb';
-       return {status:0,stdout:text};
-     }
-     return {status:0};
+     if(args[0]==='--init-ca') return {status:0,stdout:JSON.stringify({ca:trusted?'ready':'untrusted'})};
+     if(cmd==='powershell') {trusted=true;return {status:0,stdout:''};}
+     return {status:0,stdout:''};
    };
    initializeCertificate(engine,p,exec);
-   assert.equal(calls.filter(c=>c.cmd==='certutil'&&c.args.includes('-addstore')).length>0,true);
-   calls.length=0;initializeCertificate(engine,p,exec);assert.equal(calls.some(c=>c.cmd==='certutil'&&c.args.includes('-addstore')),false);
+   assert.equal(calls.filter(c=>c.cmd==='powershell').length,1);
+   calls.length=0;initializeCertificate(engine,p,exec);assert.equal(calls.some(c=>c.cmd==='powershell'),false);
    trusted=false;assert.throws(()=>initializeCertificate(engine,p,exec,{trust:false}),/尚未受信任/);
+   // An existing per-user import is not enough: the engine still says untrusted.
+   const refused=(cmd,args)=>args[0]==='--init-ca'?{status:0,stdout:'{"ca":"untrusted"}'}:{status:0};
+   assert.throws(()=>initializeCertificate(engine,p,refused),/证书导入未完成或被取消/);
  } else {
    const exec=(cmd,args,options)=>{calls.push({cmd,args,options});if(args[0]==='--init-ca')return {status:0,stdout:'{"ca":"untrusted"}'};if(args[0]==='add-trusted-cert'){trusted=true;return {status:0};}return {status:trusted?0:1};};
    initializeCertificate(engine,p,exec);

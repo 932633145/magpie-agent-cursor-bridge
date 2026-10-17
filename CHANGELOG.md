@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Turning the agent on starts the bridge: a staged release is launched as the supervisor, and a first run falls back to the packaged setup.
+- Node built-ins load lazily inside `connect()`, so the agent module still imports when the sandbox offers none.
+- Windows certificate trust follows the engine's own CA verdict. The bridge reads the local machine root store, so a per-user import no longer reports success while the bridge refuses to start.
+
 ## 0.2.1
 
 - Hide Cursor Auto in the bridge model picker using Cursor's display configuration, including clearing cached Auto controls. Magpie models and route groups remain selectable.
