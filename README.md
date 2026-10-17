@@ -15,6 +15,15 @@
 
 ---
 
+### 安装方式
+
+在 Magpie → **Plugins** 添加仓库地址安装：
+```text
+github:yujianwen19950717-arch/magpie-agent-cursor-bridge
+```
+
+---
+
 ## 安装与快速上手
 
 ### 前置条件
