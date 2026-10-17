@@ -6,6 +6,13 @@
 - Node built-ins load lazily inside `connect()`, so the agent module still imports when the sandbox offers none.
 - Windows certificate trust follows the engine's own CA verdict. The bridge reads the local machine root store, so a per-user import no longer reports success while the bridge refuses to start.
 
+### Fixed
+
+- A stale `supervisor.lock` no longer disables model sync. The lock records the owner's pid *and* start time, so a dead supervisor whose pid was reused by an unrelated process is reclaimed instead of answering "already running". This was the reported cause of Cursor showing no Magpie models while Magpie still showed the agent as connected.
+- `status.json` now carries a heartbeat, so a supervisor that dies without a clean shutdown no longer leaves a frozen `connected` state that reads as healthy.
+- A failed autostart is recorded in `autostart.log` instead of being swallowed, so a bridge that never started is diagnosable.
+- The install tests run even where the OS temp directory refuses the native engine's certificate store.
+
 ## 0.2.1
 
 - Hide Cursor Auto in the bridge model picker using Cursor's display configuration, including clearing cached Auto controls. Magpie models and route groups remain selectable.

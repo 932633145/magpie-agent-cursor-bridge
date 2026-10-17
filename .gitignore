@@ -4,3 +4,5 @@ node_modules/
 *.zip
 VERIFICATION.txt
 SHA256SUMS
+# Scratch tree install tests create where the OS temp dir is unusable.
+.bridge-tmp-*/

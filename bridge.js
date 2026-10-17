@@ -7,6 +7,7 @@ import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {atomic,applyProxy,restoreProxy} from './lib/settings.js';
 import {validate,gatewayModels} from './lib/config.js';
+import {claim,release} from './lib/lock.js';
 
 const packageDir=path.dirname(fileURLToPath(import.meta.url));
 const version=JSON.parse(fs.readFileSync(path.join(packageDir,'package.json'),'utf8')).version;
@@ -17,8 +18,18 @@ const defaultSettings=process.platform==='win32'
 const settings=process.env.CURSOR_BRIDGE_SETTINGS||defaultSettings;
 const engineBinary=path.join(packageDir,'bin',process.platform==='win32'?'cursor-magpie-bridge.exe':'cursor-magpie-bridge');
 const file=name=>path.join(root,name);
-let lastStatus='';
-const status=(state,extra={})=>{const signature=JSON.stringify({version,state,...extra});if(signature!==lastStatus){atomic(file('status.json'),JSON.stringify({version,state,...extra,updated:new Date().toISOString()},null,2));lastStatus=signature;}};
+let lastStatus='',lastWrite=0;
+// status.json also carries a heartbeat. A supervisor that dies without a clean
+// shutdown cannot rewrite the file, so a stale timestamp is the only signal a
+// reader (Magpie, install.js status) has that "connected" is no longer true.
+const status=(state,extra={},{force=false}={})=>{
+  const now=Date.now();
+  const signature=JSON.stringify({version,state,...extra});
+  if(!force && signature===lastStatus && now-lastWrite<10000) return;
+  atomic(file('status.json'),JSON.stringify({version,state,...extra,updated:new Date(now).toISOString(),heartbeat:now},null,2));
+  lastStatus=signature;
+  lastWrite=now;
+};
 const read=name=>JSON.parse(fs.readFileSync(file(name),'utf8'));
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 const command=process.argv[2]||'status';
@@ -30,14 +41,10 @@ if(command==='status') {
   fs.mkdirSync(root,{recursive:true,mode:0o700});
   if(typeof process.umask==='function'){try{process.umask(0o077);}catch{}}
   const lock=file('supervisor.lock');
-  try {fs.mkdirSync(lock);} catch(error) {
-    let live=false;
-    try {process.kill(Number(fs.readFileSync(path.join(lock,'pid'),'utf8')),0);live=true;} catch {}
-    if(live) throw new Error('bridge supervisor already running');
-    fs.rmSync(lock,{recursive:true,force:true}); fs.mkdirSync(lock);
-  }
-  fs.writeFileSync(path.join(lock,'pid'),String(process.pid));
-  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false;
+  // Pid reuse made a crashed supervisor look alive forever; the lock now pins
+  // the owner's start time and reclaims itself when that process is gone.
+  const owner=claim(lock);
+  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0;
   async function stop() {
     // Restore before stopping the listener so Cursor does not point at a dead port.
     const old=child;child=null;ready=null;
@@ -46,7 +53,7 @@ if(command==='status') {
     } finally {
       if(old && old.exitCode===null && old.signalCode===null) {
         if(process.platform==='win32') {
-          try {spawn('taskkill',['/F','/T','/PID',String(old.pid)],{stdio:'ignore'});} catch {old.kill();}
+          try {spawn('taskkill',['/F','/T','/PID',String(old.pid)],{stdio:'ignore',windowsHide:true});} catch {old.kill();}
         } else {
           old.kill('SIGTERM');
           await Promise.race([new Promise(r=>old.once('exit',r)),wait(12000)]);
@@ -61,7 +68,9 @@ if(command==='status') {
   async function start(c) {
     atomic(file('effective.json'),JSON.stringify(c));
     const engine=spawn(engineBinary,[file('effective.json')],{
-      env:{...process.env,CURSOR_BYOK_DATA_DIR:file('data')},stdio:['pipe','pipe','pipe']
+      // windowsHide: the supervisor has no console of its own, so Windows would
+      // otherwise open a console window for the engine on every start.
+      env:{...process.env,CURSOR_BYOK_DATA_DIR:file('data')},stdio:['pipe','pipe','pipe'],windowsHide:true
     });
     child=engine;
     // Native diagnostics can contain request information; never forward them into public logs.
@@ -83,7 +92,7 @@ if(command==='status') {
       try {
         const raw=fs.existsSync(file('connection.json'))?fs.readFileSync(file('connection.json'),'utf8'):'{}';
         const c=validate(JSON.parse(raw));
-        if(!c) {await stop();status('disconnected');paused=false;lastConfig='';}
+        if(!c) {await stop();status('disconnected',{}, {force:true});paused=false;lastConfig='';}
         else if(paused && raw===lastConfig) {status('paused',{reason:'Cursor 代理设置由其他程序改动；请在 Magpie 中断开后重新连接。'});}
         else {
           const changed=raw!==lastConfig;
@@ -93,8 +102,12 @@ if(command==='status') {
             if(!child || child.exitCode!==null || child.signalCode!==null) {
               await stop();await start(effective);
             } else atomic(file('effective.json'),JSON.stringify(effective));
-            lastConfig=raw;paused=false;
-            status('connected',{model:c.model,models:effective.models.length,proxy:ready.proxy,backend:ready.backend,pid:child.pid});
+            lastConfig=raw;paused=false;lastModels=effective.models.length;
+            status('connected',{model:c.model,models:lastModels,proxy:ready.proxy,backend:ready.backend,pid:child.pid},{force:true});
+          } else {
+            // The proxy is reapplied on every pass, so an unchanged state would
+            // otherwise never be rewritten; readers rely on the heartbeat.
+            status('connected',{model:c.model,models:lastModels,proxy:ready.proxy,backend:ready.backend,pid:child.pid});
           }
           try {applyProxy(settings,file('settings-journal.json'),ready.proxy);} catch(e) {
             await stop();paused=true;lastConfig=raw;throw e;
@@ -102,11 +115,11 @@ if(command==='status') {
         }
       } catch(e) {
         try {await stop();} catch { /* keep journal for recovery after malformed settings are fixed */ }
-        status('error',{reason:e.message});
+        status('error',{reason:e.message},{force:true});
       }
       if(!ending) await wait(2000);
     }
   } finally {
-    await stop();status('stopped');fs.rmSync(lock,{recursive:true,force:true});
+    await stop();status('stopped',{},{force:true});release(lock,owner);
   }
 } else {throw new Error('usage: node bridge.js status|supervise|restore');}
