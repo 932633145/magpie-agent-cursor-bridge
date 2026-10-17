@@ -14,7 +14,7 @@
   },
   "magpie": {
     "agent": "./agent.js",
-    "icon": "file:b3e404b5dda1c27d.png"
+    "icon": "cursor"
   },
   "scripts": {
     "test": "node --test test/*.test.js",

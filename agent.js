@@ -1,7 +1,7 @@
 ﻿export const agent = {
   id: "cursor-bridge",
   name: "Cursor · Magpie Bridge",
-  icon: "file:b3e404b5dda1c27d.png",
+  icon: "cursor",
   bin: "cursor",
   dir: "~/.cursor",
   config: "~/.config/magpie-cursor-bridge/connection.json",
