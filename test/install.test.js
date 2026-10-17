@@ -13,7 +13,34 @@ const isWin = process.platform === 'win32';
 const source=fileURLToPath(new URL('..',import.meta.url));
 const binName = isWin ? 'bin/cursor-magpie-bridge.exe' : 'bin/cursor-magpie-bridge';
 const engine=path.join(source,binName);
-const temp=t=>{const p=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-install-test-'));t.after(()=>fs.rmSync(p,{recursive:true,force:true}));return p;};
+const temp=t=>{
+  const base=workingTemp();
+  const p=fs.mkdtempSync(path.join(base,'bridge-install-test-'));
+  t.after(()=>fs.rmSync(p,{recursive:true,force:true}));
+  return p;
+};
+// Some sandboxes allow no writes to the OS temp directory; the native engine
+// then fails opening its data directory, which says nothing about the plugin.
+// The check runs the engine itself, because a directory can be writable by Node
+// and still be refused a certificate store.
+let fallbackBase=null;
+process.on('exit',()=>{try{if(fallbackBase) fs.rmSync(fallbackBase,{recursive:true,force:true});}catch{}});
+const engineUsable=dir=>{
+  try {
+    const probe=path.join(dir,`.bridge-ca-${process.pid}`);
+    const result=spawnSync(engine,['--init-ca'],{encoding:'utf8',env:{...process.env,CURSOR_BYOK_DATA_DIR:probe}});
+    fs.rmSync(probe,{recursive:true,force:true});
+    return result.status===0;
+  } catch { return false; }
+};
+const workingTemp=()=>{
+  if(engineUsable(path.join(os.tmpdir(),`.bridge-check-${process.pid}`))) return os.tmpdir();
+  // A sandboxed profile can refuse both the OS temp dir and its parent; the
+  // workspace itself is the only fully writable tree left.
+  if(!fallbackBase) fallbackBase=fs.mkdtempSync(path.join(source,'.bridge-tmp-'));
+  return fallbackBase;
+};
+export const TEST_SCRATCH='.bridge-tmp-';
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const init=root=>spawnSync(engine,['--init-ca'],{encoding:'utf8',env:{...process.env,CURSOR_BYOK_DATA_DIR:root}});
 
@@ -100,7 +127,9 @@ test('GitHub installation supports a dependency hoisted by Magpie Bun',t=>{
  const home=temp(t),parent=path.join(home,'node_modules'),plugin=path.join(parent,'magpie-agent-cursor-bridge');
  fs.mkdirSync(plugin,{recursive:true});
  for(const name of fs.readdirSync(source)) {
-   if(['node_modules','.git'].includes(name)) continue;
+   // Skip the plugin's own dependencies and the scratch tree a sandboxed run
+   // may have created inside the package; copying either recurses into itself.
+   if(['node_modules','.git'].includes(name) || name.startsWith(TEST_SCRATCH)) continue;
    fs.cpSync(path.join(source,name),path.join(plugin,name),{recursive:true});
  }
  fs.cpSync(path.dirname(createRequire(import.meta.url).resolve('jsonc-parser/package.json')),path.join(parent,'jsonc-parser'),{recursive:true});
