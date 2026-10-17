@@ -1,11 +1,9 @@
 {
-  "name": "cursor-magpie-bridge",
+  "name": "magpie-agent-cursor-bridge",
   "version": "0.2.1",
   "type": "module",
   "description": "Cursor protocol bridge backed by Magpie for Windows and macOS",
   "license": "MIT",
-  "main": "./index.js",
-  "exports": "./index.js",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/932633145/magpie-agent-cursor-bridge.git"
@@ -44,7 +42,6 @@
     "setup.cmd",
     "lib",
     "bin",
-    "index.js",
     "icon.svg",
     "icon.png",
     "integrity.json",
