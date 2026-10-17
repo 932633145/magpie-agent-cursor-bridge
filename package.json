@@ -6,11 +6,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yujianwen19950717-arch/magpie-agent-cursor-bridge.git"
+    "url": "git+https://github.com/932633145/magpie-agent-cursor-bridge.git"
   },
-  "homepage": "https://github.com/yujianwen19950717-arch/magpie-agent-cursor-bridge#readme",
+  "homepage": "https://github.com/932633145/magpie-agent-cursor-bridge#readme",
   "bugs": {
-    "url": "https://github.com/yujianwen19950717-arch/magpie-agent-cursor-bridge/issues"
+    "url": "https://github.com/932633145/magpie-agent-cursor-bridge/issues"
   },
   "magpie": {
     "agent": "./agent.js",

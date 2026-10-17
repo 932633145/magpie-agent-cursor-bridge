@@ -19,7 +19,7 @@
 
 在 Magpie → **Plugins** 添加仓库地址安装：
 ```text
-github:yujianwen19950717-arch/magpie-agent-cursor-bridge
+github:932633145/magpie-agent-cursor-bridge
 ```
 
 ---
