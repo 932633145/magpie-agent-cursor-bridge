@@ -58,7 +58,33 @@ test('fresh machines generate distinct CAs without a BYOK install, database or t
  fs.unlinkSync(path.join(one,'ca/ca.crt'));assert.notEqual(init(one).status,0);assert.equal(hash(path.join(one,'ca/ca.key')),before);
 });
 
-test('package and native engine have the same pinned version and digest',()=>{assert.equal(verifyPackage(source).version,'0.2.1');});
+test('package and native engine have the same pinned version and digest',()=>{assert.equal(verifyPackage(source).version,'0.2.2');});
+
+test('a JavaScript release verifies against its pinned engine build, not its own number',t=>{
+  // The native engine's version is compiled in, so a JS-only release (0.2.2)
+  // ships an engine that still reports 0.2.1. integrity.json pins both.
+  const manifest=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8'));
+  const checksums=JSON.parse(fs.readFileSync(path.join(source,'integrity.json'),'utf8'));
+  assert.notEqual(checksums.engine_version,manifest.version,'fixture should differ, or this proves nothing');
+  assert.equal(verifyPackage(source).version,manifest.version);
+  // A different engine build is still rejected: the pin is not a free pass.
+  assert.throws(()=>verifyPackage(source,()=>({status:0,stdout:'9.9.9'})),/后台程序版本与安装包不符/);
+});
+
+test('an integrity file without engine_version still pins the engine to the release',t=>{
+  const dir=temp(t),plugin=path.join(dir,'plugin');
+  fs.mkdirSync(plugin,{recursive:true});
+  for(const name of fs.readdirSync(source)) {
+    if(['node_modules','.git'].includes(name) || name.startsWith(TEST_SCRATCH)) continue;
+    fs.cpSync(path.join(source,name),path.join(plugin,name),{recursive:true});
+  }
+  fs.cpSync(path.dirname(createRequire(import.meta.url).resolve('jsonc-parser/package.json')),path.join(plugin,'node_modules/jsonc-parser'),{recursive:true});
+  const checksums=JSON.parse(fs.readFileSync(path.join(plugin,'integrity.json'),'utf8'));
+  delete checksums.engine_version;
+  fs.writeFileSync(path.join(plugin,'integrity.json'),JSON.stringify(checksums));
+  // Without the explicit pin the older rule applies: versions must match.
+  assert.throws(()=>verifyPackage(plugin),/后台程序版本与安装包不符/);
+});
 
 test('certificate trust follows the engine verdict and refuses failed authorization',t=>{
  const p=paths(temp(t)),calls=[];let trusted=false;
@@ -96,7 +122,7 @@ test('service plist escapes paths and uses an installed runtime, independent of 
 
 test('complete staging never overwrites an existing running release',t=>{
  const p=paths(temp(t));const fakeRuntime=path.join(p.home,'runtime');fs.writeFileSync(fakeRuntime,'test');
- const one=stage(source,p,'0.2.1',fakeRuntime),two=stage(source,p,'0.2.1',fakeRuntime);
+ const one=stage(source,p,'0.2.2',fakeRuntime),two=stage(source,p,'0.2.2',fakeRuntime);
  assert.notEqual(one,two);assert.equal(hash(path.join(one,binName)),hash(engine));
  assert.ok(fs.existsSync(path.join(two,'node_modules/jsonc-parser/package.json')));
  const runtimeFile = path.join(two, isWin ? 'bin/runtime.exe' : 'bin/runtime');
@@ -109,7 +135,7 @@ test('failed activation restores previous launch configuration and restarts prev
    const p=paths(temp(t));
    // Never touch the real Startup folder from a test; Windows can lock it mid-run.
    p.startupScript=path.join(p.home,'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup',`${label}.vbs`);
-   const release=stage(source,p,'0.2.1',process.execPath);
+   const release=stage(source,p,'0.2.2',process.execPath);
    let ran=false;
    const exec=(cmd,args)=>{if(cmd==='wscript.exe') ran=true; return {status:0};};
    await activate(p,release,'',exec);
@@ -133,8 +159,8 @@ test('GitHub installation supports a dependency hoisted by Magpie Bun',t=>{
    fs.cpSync(path.join(source,name),path.join(plugin,name),{recursive:true});
  }
  fs.cpSync(path.dirname(createRequire(import.meta.url).resolve('jsonc-parser/package.json')),path.join(parent,'jsonc-parser'),{recursive:true});
- assert.equal(verifyPackage(plugin).version,'0.2.1');
+ assert.equal(verifyPackage(plugin).version,'0.2.2');
  const runtime=path.join(home,'runtime');fs.writeFileSync(runtime,'test');
- const release=stage(plugin,paths(home),'0.2.1',runtime);
+ const release=stage(plugin,paths(home),'0.2.2',runtime);
  assert.ok(fs.existsSync(path.join(release,'node_modules/jsonc-parser/package.json')));
 });

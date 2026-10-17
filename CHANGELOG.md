@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
 - Turning the agent on starts the bridge: a staged release is launched as the supervisor, and a first run falls back to the packaged setup.
 - Node built-ins load lazily inside `connect()`, so the agent module still imports when the sandbox offers none.
 - Windows certificate trust follows the engine's own CA verdict. The bridge reads the local machine root store, so a per-user import no longer reports success while the bridge refuses to start.
+- The packaged native engine stays at 0.2.1: its version is compiled into the binary, so `integrity.json` now pins `engine_version` separately and a JavaScript release no longer has to match it.
 
 ### Fixed
 
