@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Starting the bridge is reported as `starting` until the engine is up, so a reader never sees the previous run's `connected` during the gap.
+- The agent notice no longer tells users to restart Cursor. The catalogue is served per request, so opening a panel or the model picker is enough; the old wording sent users to a restart that merely masked the startup delay.
+
 ## 0.2.2
 
 - Turning the agent on starts the bridge: a staged release is launched as the supervisor, and a first run falls back to the packaged setup.

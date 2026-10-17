@@ -45,9 +45,12 @@ github:932633145/magpie-agent-cursor-bridge
    - 打开 Magpie，在 **Agents** 页面找到 **Cursor · Magpie Bridge**。
    - 打开开关，并从下拉列表中挑选您希望在 Cursor 中使用的模型或路由组。
 
-3. **重启 Cursor**：
-   - 完全关闭并重启 Cursor 编辑器。
-   - 打开对话面板，在底部模型选择列表中即可看到 Magpie 提供的模型，点击即可畅快对话。
+3. **在 Cursor 中刷新模型列表**：
+   - 首次开启后，后台桥接需要几十秒启动；等状态变为已连接即可。
+   - 打开对话面板，或点一下底部的模型下拉框——Cursor 会重新拉取模型表，Magpie 提供的模型随即出现，点击即可畅快对话。
+
+   > 无需重启 Cursor。模型目录是按请求下发的，只要 Cursor 重新发起一次拉取就会更新；
+   > 若列表没变，再点一次模型下拉框即可。重启也只是强制刷新的一种方式。
 
 ---
 
@@ -60,9 +63,9 @@ github:932633145/magpie-agent-cursor-bridge
    ```
    *根据系统提示完成本地钥匙串证书信任授权。*
 
-2. **在 Magpie 中选择模型并重启 Cursor**：
+2. **在 Magpie 中选择模型**：
    - 在 Magpie → **Agents** 中开启 **Cursor · Magpie Bridge** 并选择模型。
-   - 重启 Cursor 即可生效。
+   - 等后台桥接启动完成（几十秒），在 Cursor 中打开对话面板或点一下模型下拉框即可看到 Magpie 的模型；无需重启 Cursor。
 
 ---
 

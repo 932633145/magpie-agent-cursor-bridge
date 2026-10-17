@@ -75,3 +75,13 @@ test('an old pid-only lock still reports a live owner', t => {
   fs.writeFileSync(path.join(lock, 'pid'), String(process.pid));
   assert.equal(held(path.join(lock, 'owner.json')), false, 'no owner.json means untrusted');
 });
+
+test('the supervisor publishes a starting state before the engine is up', () => {
+  const text = fs.readFileSync(new URL('../bridge.js', import.meta.url), 'utf8');
+  // The engine needs seconds to start; without this the previous run's
+  // "connected" is the last thing a reader sees and looks healthy.
+  assert.match(text, /status\('starting'/);
+  const starting = text.indexOf("status('starting'");
+  const loop = text.indexOf('while(!ending)');
+  assert.ok(starting > 0 && loop > starting, 'starting must precede the supervise loop');
+});

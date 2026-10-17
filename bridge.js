@@ -88,6 +88,9 @@ if(command==='status') {
   for(const signal of signals) process.on(signal,()=>{ending=true;});
   try {
     restoreProxy(file('settings-journal.json'));
+    // Publish the wait before it happens: the engine needs seconds to start, and
+    // readers must not mistake that gap for the previous run's state.
+    status('starting',{reason:'正在启动后台桥接'},{force:true});
     while(!ending) {
       try {
         const raw=fs.existsSync(file('connection.json'))?fs.readFileSync(file('connection.json'),'utf8'):'{}';

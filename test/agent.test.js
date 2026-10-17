@@ -46,6 +46,30 @@ test('turning the agent on starts the bridge without an explicit setup step', ()
   assert.match(text, /supervisor\.lock/, 'an already running supervisor is reused');
 });
 
+test('connect() answers immediately instead of blocking on startup', () => {
+  process.env.MAGPIE_CURSOR_BRIDGE_NO_AUTOSTART = '1';
+  try {
+    const started = Date.now();
+    const result = connect({
+      gateway: {v1: 'http://127.0.0.1:3425/v1', key: 'k'},
+      model: 'm', models: [{id: 'm'}],
+    });
+    // Readiness is reported through status.json; the return value stays cheap.
+    assert.ok(Date.now() - started < 1000, 'connect must not wait for the bridge');
+    assert.equal(result.enabled, true);
+  } finally {
+    delete process.env.MAGPIE_CURSOR_BRIDGE_NO_AUTOSTART;
+  }
+});
+
+test('the notice tells users no restart is needed and how to refresh Cursor', () => {
+  // Restarting Cursor was never required: the catalogue is served per request.
+  // The old wording sent users to a restart that masked startup delays.
+  assert.doesNotMatch(agent.notice, /重启一次 Cursor/);
+  assert.match(agent.notice, /无需重启/);
+  assert.match(agent.notice, /模型下拉框|对话面板/);
+});
+
 test('the supervisor runs on the runtime copy inside the staged release', () => {
   const text = fs.readFileSync(source, 'utf8');
   // setup copies the runtime into the release; a global Node or Bun may not exist.

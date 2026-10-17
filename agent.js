@@ -8,7 +8,7 @@ export const agent = {
   format: "json",
   model: "model",
   ua: ["cursor-magpie-bridge"],
-  notice: "打开开关即可接管 Cursor。首次会自动安装后台桥接；若弹出证书确认，选“是”。之后重启一次 Cursor。"
+  notice: "打开开关即可接管 Cursor，无需重启。首次会自动安装后台桥接（约几十秒）；若弹出证书确认，选“是”。就绪后在 Cursor 里打开对话面板或点一下模型下拉框，Magpie 的模型就会出现在列表里。"
 };
 
 // Turning the agent on starts the bridge itself, so no setup step comes first.
@@ -33,15 +33,38 @@ function start() {
     const {spawn, execFileSync} = await import('node:child_process');
     const root = process.env.CURSOR_BRIDGE_ROOT || path.join(os.homedir(), '.config', 'magpie-cursor-bridge');
     // A live supervisor already keeps Cursor pointed at the bridge.
-    if (alive(fs, path, execFileSync, root)) return;
+    if (alive(fs, path, execFileSync, root)) { watch(fs, path, root, Date.now()); return; }
     const release = staged(fs, path, root);
-    if (release) { launch(spawn, chooseRuntime(fs, release), release, root); return; }
+    const launched = Date.now();
+    if (release) { launch(spawn, chooseRuntime(fs, release), release, root); watch(fs, path, root, launched); return; }
     await setup(fs, path, spawn, root);
+    watch(fs, path, root, launched);
   }).catch(error => {
     // Swallowing this silently left Cursor on its own models with the toggle
     // still reading "connected"; keep the reason where the bridge status lives.
     report(error);
   });
+}
+
+// connect() must answer Magpie immediately, so readiness is reported through
+// status.json rather than the return value. Polling stops once the bridge
+// settles, so a healthy start costs a single read.
+function watch(fs, path, root, since) {
+  const file = path.join(root, 'status.json');
+  const settled = () => {
+    try {
+      const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // A status written before this start belongs to the previous run.
+      if (!(Number(state.heartbeat) >= since)) return null;
+      return ['connected', 'error', 'paused'].includes(state.state) ? state.state : null;
+    } catch { return null; }
+  };
+  let attempts = 0;
+  const tick = () => {
+    if (settled() || ++attempts > 60) return;
+    setTimeout(tick, 1000).unref?.();
+  };
+  setTimeout(tick, 1000).unref?.();
 }
 
 // Never let a diagnostics write decide whether connect() succeeded.
