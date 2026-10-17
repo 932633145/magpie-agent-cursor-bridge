@@ -14,7 +14,7 @@
   },
   "magpie": {
     "agent": "./agent.js",
-    "icon": "https://raw.githubusercontent.com/932633145/magpie-agent-cursor-bridge/main/icon.png"
+    "icon": "file:b3e404b5dda1c27d.png"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
