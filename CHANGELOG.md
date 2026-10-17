@@ -8,6 +8,8 @@
 
 - Standard Magpie Agent package with an explicit file allowlist and bundled JavaScript dependency.
 - Independent, per-machine certificate initialization; no original Cursor BYOK installation needed.
+- Windows trust checks the generated CA thumbprint, so an older Cursor BYOK root with the same name is not treated as trusted.
+- Turning the agent on starts the local supervisor when it is not already running.
 - Explicit macOS certificate trust step with SSL trust verification; existing certificates preserved.
 - Setup reuses Magpie's Bun and keeps a local runtime copy, removing the dependency on user-installed Node.
 - Plugin/native version pairing and native SHA-256 verification.

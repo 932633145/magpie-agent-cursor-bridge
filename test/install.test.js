@@ -6,7 +6,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {createRequire} from 'node:module';
-import {createHash} from 'node:crypto';
+import {createHash, X509Certificate} from 'node:crypto';
 import {paths,verifyPackage,initializeCertificate,stage,activate,plistText} from '../lib/install.js';
 
 const isWin = process.platform === 'win32';
@@ -38,13 +38,20 @@ test('certificate trust uses platform policy and argument arrays, and refuses fa
  if (isWin) {
    const exec=(cmd,args,options)=>{
      calls.push({cmd,args,options});
-     if(args[0]==='--init-ca') return {status:0,stdout:'{"ca":"untrusted"}'};
-     if(cmd==='certutil' && args.includes('-addstore')) {trusted=true;return {status:0};}
-     if(cmd==='certutil' && args.includes('-verifystore')) return {status:trusted?0:1};
+     if(args[0]==='--init-ca') {
+       const real=spawnSync(engine,['--init-ca'],{encoding:'utf8',env:{...process.env,CURSOR_BYOK_DATA_DIR:path.join(p.root,'data')}});
+       return {status:0,stdout:real.stdout||'{"ca":"untrusted"}'};
+     }
+     if(cmd==='certutil' && args.includes('-addstore')) {trusted=true;return {status:0,stdout:''};}
+     if(cmd==='certutil' && args.includes('-store')) {
+       const file=path.join(p.root,'data/ca/ca.crt');
+       const text=trusted && fs.existsSync(file) ? new X509Certificate(fs.readFileSync(file)).fingerprint : 'aa bb';
+       return {status:0,stdout:text};
+     }
      return {status:0};
    };
    initializeCertificate(engine,p,exec);
-   assert.equal(calls.filter(c=>c.cmd==='powershell'||(c.cmd==='certutil'&&c.args.includes('-addstore'))).length>0,true);
+   assert.equal(calls.filter(c=>c.cmd==='certutil'&&c.args.includes('-addstore')).length>0,true);
    calls.length=0;initializeCertificate(engine,p,exec);assert.equal(calls.some(c=>c.cmd==='certutil'&&c.args.includes('-addstore')),false);
    trusted=false;assert.throws(()=>initializeCertificate(engine,p,exec,{trust:false}),/尚未受信任/);
  } else {

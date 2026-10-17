@@ -1,3 +1,9 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawn} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+
 export const agent = {
   id: "cursor-bridge",
   name: "Cursor · Magpie Bridge",
@@ -8,9 +14,31 @@ export const agent = {
   format: "json",
   model: "model",
   ua: ["cursor-magpie-bridge"],
-  notice: "在 Magpie 中选择模型，首次连接后重启 Cursor 即可开始使用。后台桥接随连接自动启停；断开后自动还原代理。"
+  notice: "打开开关即可接管 Cursor。首次会自动安装后台桥接；若弹出证书确认，选“是”。之后重启一次 Cursor。"
 };
+
+export function ensureSupervisor({
+  env = process.env,
+  root = path.join(os.homedir(), '.config', 'magpie-cursor-bridge'),
+  spawnImpl = spawn,
+  runtime = process.execPath,
+  install = path.join(path.dirname(fileURLToPath(import.meta.url)), 'install.js'),
+} = {}) {
+  // Magpie writes connection.json, then a local supervisor applies the proxy.
+  // Start that supervisor when the user turns the agent on.
+  if (env.MAGPIE_CURSOR_BRIDGE_NO_AUTOSTART) return false;
+  const pidFile = path.join(root, 'supervisor.lock', 'pid');
+  try {
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    if (pid > 0) { process.kill(pid, 0); return false; }
+  } catch {}
+  const child = spawnImpl(runtime, [install, 'setup'], {detached: true, stdio: 'ignore', windowsHide: true});
+  child.unref?.();
+  return true;
+}
+
 export function connect({ gateway, model, models }) {
+  ensureSupervisor();
   return {
     enabled: true,
     gateway: gateway.v1,
