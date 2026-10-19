@@ -10,6 +10,13 @@ import {validate,gatewayModels} from './lib/config.js';
 import {claim,held,release} from './lib/lock.js';
 import {readWired, nextMagpieGate} from './lib/magpie.js';
 import {shouldRevive} from './lib/watch.js';
+import {listenFixed} from './lib/relay.js';
+
+// Cursor caches the proxy address it read from settings.json, so an engine that
+// takes a fresh port on every restart leaves Cursor dialing a closed one until it
+// notices. Publishing a fixed port from the bridge keeps that address valid
+// across restarts, whatever port the engine ends up on.
+const relayPort=Number(process.env.CURSOR_BRIDGE_RELAY_PORT)||52407;
 
 const packageDir=path.dirname(fileURLToPath(import.meta.url));
 const version=JSON.parse(fs.readFileSync(path.join(packageDir,'package.json'),'utf8')).version;
@@ -108,7 +115,29 @@ if(command==='status') {
       // decide; the engine writes its own reason to stderr.
       engine.once('exit',(code,signal)=>{clearTimeout(timer);reject(new Error(`bridge engine exited before ready (${signal||code})`));});
     });
-    applyProxy(settings,file('settings-journal.json'),ready.proxy);
+    await publishProxy(ready.proxy);
+  }
+  // What Cursor is told to use. The relay keeps this constant across restarts.
+  function publicProxy() {
+    return relay ? `http://127.0.0.1:${relay.port}` : ready.proxy;
+  }
+  // The engine's port changes on every start, so the relay is what stays put.
+  // It is started once and its upstream follows `engineProxy`.
+  let engineProxy=null,relay=null;
+  async function publishProxy(proxy) {
+    engineProxy=proxy;
+    const upstream=Number(new URL(proxy).port);
+    if(relay) return applyProxy(settings,file('settings-journal.json'),`http://127.0.0.1:${relay.port}`);
+    const {relay:created,port,fixed}=await listenFixed(()=>engineProxy?Number(new URL(engineProxy).port):upstream,relayPort);
+    relay={server:created,port};
+    // The preferred port is how Cursor keeps a working address across restarts;
+    // saying so is better than silently publishing a different one.
+    if(!fixed) status('starting',{reason:`端口 ${relayPort} 暂不可用，本次使用 ${port}；端口释放后会恢复`},{force:true});
+    return applyProxy(settings,file('settings-journal.json'),`http://127.0.0.1:${port}`);
+  }
+  async function closeRelay() {
+    const old=relay;relay=null;
+    if(old) { try { await old.server.close(); } catch {} }
   }
   function ensureWatch() {
     if (process.env.CURSOR_BRIDGE_NO_WATCHDOG === '1') return;
@@ -165,7 +194,7 @@ if(command==='status') {
           await stop();
           status('disconnected',{reason:'已在 Magpie 中关闭接入'},{force:true});
           paused=false;lastConfig='';lastModels=0;
-          if(!ending) await wait(2000);
+          if(!ending) await wait(600);
           continue;
         }
         const raw=fs.existsSync(file('connection.json'))?fs.readFileSync(file('connection.json'),'utf8'):'{}';
@@ -187,18 +216,21 @@ if(command==='status') {
           const changed=raw!==lastConfig;
           if(changed || Date.now()>=nextRefresh || !child || child.exitCode!==null || child.signalCode!==null) {
             const effective=await gatewayModels(c);
-            nextRefresh=Date.now()+15000;
+            // The gateway answers in tens of milliseconds, so a longer period
+            // only delayed a model added in Magpie; Cursor re-reads the catalog
+            // on its own schedule and needs the new entries to be there.
+            nextRefresh=Date.now()+4000;
             if(!child || child.exitCode!==null || child.signalCode!==null) {
               await stop();await start(effective);
             } else atomic(file('effective.json'),JSON.stringify(effective));
             lastConfig=raw;paused=false;lastModels=effective.models.length;pausedRetries=0;
-            status('connected',{model:c.model,models:lastModels,proxy:ready.proxy,backend:ready.backend,pid:child.pid},{force:true});
+            status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid},{force:true});
           } else {
             // The proxy is reapplied on every pass, so an unchanged state would
             // otherwise never be rewritten; readers rely on the heartbeat.
-            status('connected',{model:c.model,models:lastModels,proxy:ready.proxy,backend:ready.backend,pid:child.pid});
+            status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid});
           }
-          try {applyProxy(settings,file('settings-journal.json'),ready.proxy);} catch(e) {
+          try {applyProxy(settings,file('settings-journal.json'),publicProxy());} catch(e) {
             await stop();paused=true;lastConfig=raw;throw e;
           }
         }
@@ -206,10 +238,13 @@ if(command==='status') {
         try {await stop();} catch { /* keep journal for recovery after malformed settings are fixed */ }
         status('error',{reason:e.message},{force:true});
       }
-      if(!ending) await wait(2000);
+      // A toggle is noticed within one pass; the gateway call this guards costs
+      // tens of milliseconds, so a shorter period is cheap and removes the wait
+      // a user sees between flipping the switch and seeing models.
+      if(!ending) await wait(600);
     }
   } finally {
-    await stop();status('stopped',{},{force:true});release(lock,owner);
+    await stop();await closeRelay();status('stopped',{},{force:true});release(lock,owner);
   }
 } else if(command==='watch') {
   if (process.env.CURSOR_BRIDGE_NO_WATCHDOG === '1') process.exit(0);

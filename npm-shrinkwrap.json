@@ -1,12 +1,12 @@
 {
   "name": "magpie-agent-cursor-bridge",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "magpie-agent-cursor-bridge",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "bundleDependencies": [
         "jsonc-parser"
       ],
