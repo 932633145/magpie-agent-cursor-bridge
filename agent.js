@@ -67,6 +67,10 @@ function watch(fs, path, root, since) {
   setTimeout(tick, 1000).unref?.();
 }
 
+// A Magpie connect() is one shot: nothing runs afterwards, so a supervisor that
+// later dies stays dead until the user toggles the agent again. That is left to
+// the watchdog built into bridge.js, which the supervisor starts for itself.
+
 // Never let a diagnostics write decide whether connect() succeeded.
 function report(error) {
   try {

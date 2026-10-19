@@ -44,7 +44,10 @@ if(command==='status') {
   // Pid reuse made a crashed supervisor look alive forever; the lock now pins
   // the owner's start time and reclaims itself when that process is gone.
   const owner=claim(lock);
-  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0;
+  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0,pausedRetries=0;
+  // Roughly a minute of retries at the 2s loop, then the journal is dropped and
+  // the bridge reclaims the proxy keys, which is what the user expects anyway.
+  const pauseLimit=30;
   async function stop() {
     // Restore before stopping the listener so Cursor does not point at a dead port.
     const old=child;child=null;ready=null;
@@ -53,7 +56,12 @@ if(command==='status') {
     } finally {
       if(old && old.exitCode===null && old.signalCode===null) {
         if(process.platform==='win32') {
-          try {spawn('taskkill',['/F','/T','/PID',String(old.pid)],{stdio:'ignore',windowsHide:true});} catch {old.kill();}
+          // No /T: the engine is a direct child, and killing its tree has taken
+          // down supervisors started from the same console. /F alone is enough.
+          try {
+            const killer=spawn('taskkill',['/F','/PID',String(old.pid)],{stdio:'ignore',windowsHide:true});
+            killer.on?.('error',()=>{try{old.kill();}catch{}});
+          } catch {try{old.kill();}catch{}}
         } else {
           old.kill('SIGTERM');
           await Promise.race([new Promise(r=>old.once('exit',r)),wait(12000)]);
@@ -86,6 +94,14 @@ if(command==='status') {
   }
   const signals=process.platform==='win32'?['SIGINT','SIGBREAK']:['SIGTERM','SIGINT'];
   for(const signal of signals) process.on(signal,()=>{ending=true;});
+  // A supervisor must never leave Cursor pointed at a proxy that is gone: that
+  // turns every request into "failed to establish a socket connection" with no
+  // hint about the cause. Interactive stop() runs on signals; this covers the
+  // abrupt exits signals cannot see (SIGHUP on console close, fatal errors).
+  const panic=()=>{try{restoreProxy(file('settings-journal.json'));}catch{}};
+  process.on('exit',panic);
+  process.on('uncaughtException',error=>{panic();status('error',{reason:error?.message||String(error)},{force:true});process.exit(1);});
+  process.on('unhandledRejection',()=>{/* keep serving; a single request must not stop the proxy */});
   try {
     restoreProxy(file('settings-journal.json'));
     // Publish the wait before it happens: the engine needs seconds to start, and
@@ -96,7 +112,18 @@ if(command==='status') {
         const raw=fs.existsSync(file('connection.json'))?fs.readFileSync(file('connection.json'),'utf8'):'{}';
         const c=validate(JSON.parse(raw));
         if(!c) {await stop();status('disconnected',{}, {force:true});paused=false;lastConfig='';}
-        else if(paused && raw===lastConfig) {status('paused',{reason:'Cursor 代理设置由其他程序改动；请在 Magpie 中断开后重新连接。'});}
+        else if(paused && raw===lastConfig) {
+          // The journal says another program owns the proxy keys now. That is
+          // often Cursor rewriting settings.json on its own restart, not a real
+          // conflict, so retry rather than staying down until a manual toggle.
+          pausedRetries++;
+          if(pausedRetries>=pauseLimit) {
+            try {fs.rmSync(file('settings-journal.json'),{force:true});} catch {}
+            paused=false;pausedRetries=0;lastConfig='';
+          } else {
+            status('paused',{reason:'Cursor 代理设置被其他程序改动，正在重试接管…'});
+          }
+        }
         else {
           const changed=raw!==lastConfig;
           if(changed || Date.now()>=nextRefresh || !child || child.exitCode!==null || child.signalCode!==null) {
@@ -105,7 +132,7 @@ if(command==='status') {
             if(!child || child.exitCode!==null || child.signalCode!==null) {
               await stop();await start(effective);
             } else atomic(file('effective.json'),JSON.stringify(effective));
-            lastConfig=raw;paused=false;lastModels=effective.models.length;
+            lastConfig=raw;paused=false;lastModels=effective.models.length;pausedRetries=0;
             status('connected',{model:c.model,models:lastModels,proxy:ready.proxy,backend:ready.backend,pid:child.pid},{force:true});
           } else {
             // The proxy is reapplied on every pass, so an unchanged state would
