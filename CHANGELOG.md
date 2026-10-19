@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.5
+
+Cursor reads `http.proxy` once and keeps using that address, so writing the
+setting was never enough: Cursor only noticed when its own retry backoff
+expired. Leaving the address stable helped, but the switch still felt slow.
+
+### Fixed
+
+- Cursor is restarted when, and only when, the published proxy address actually
+  changes. This is what upstream cursor-byok does: it ends Cursor before writing
+  the settings, and Cursor reads the new proxy as it reopens. The switch is now
+  immediate in both directions instead of waiting for Cursor to come around.
+  A rewrite with the same address still does nothing, so a healthy bridge never
+  kills Cursor in a loop.
+- `applyProxy` now reports whether the settings text changed, which is what
+  separates a real switch from the per-pass rewrite. Disconnecting relies on the
+  same signal, so Cursor drops the Magpie models as soon as the keys are removed
+  instead of continuing to use a proxy that is gone.
+
+### Added
+
+- `CURSOR_BRIDGE_NO_RESTART=1` keeps Cursor running, trading the immediate
+  switch for Cursor's own refresh delay. Useful while something unsaved is open.
+
 ## 0.2.4
 
 Cursor caches the proxy address it read from `settings.json`, so anything that moved that address cost a visible stall. Both changes below keep the published address and the map behind it still.

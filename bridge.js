@@ -72,8 +72,11 @@ if(command==='status') {
       // journal is the accurate undo, but it can be missing after a crash or a
       // paused reclaim, and then the proxy keys would stay pointed at a port
       // that is about to close.
-      if(fs.existsSync(journal)) return restoreProxy(journal);
-      return clearStaleProxy(settings);
+      // Cursor keeps using the address it already read, so removing the keys is
+      // not enough on its own: it has to be told to read them again, otherwise
+      // the model list keeps showing Magpie entries that no longer work.
+      if(fs.existsSync(journal)) { const removed=restoreProxy(journal); ensureCursorReadsNewProxy(true); return removed; }
+      const cleared=clearStaleProxy(settings); if(cleared.length) ensureCursorReadsNewProxy(true); return cleared;
     } finally {
       if(old && old.exitCode===null && old.signalCode===null) {
         if(process.platform==='win32') {
@@ -116,6 +119,9 @@ if(command==='status') {
       engine.once('exit',(code,signal)=>{clearTimeout(timer);reject(new Error(`bridge engine exited before ready (${signal||code})`));});
     });
     await publishProxy(ready.proxy);
+    // A fresh address has to reach Cursor, which caches the value it read.
+    allowCursorRestart();
+    ensureCursorReadsNewProxy(true);
   }
   // What Cursor is told to use. The relay keeps this constant across restarts.
   function publicProxy() {
@@ -132,13 +138,45 @@ if(command==='status') {
     relay={server:created,port};
     // The preferred port is how Cursor keeps a working address across restarts;
     // saying so is better than silently publishing a different one.
-    if(!fixed) status('starting',{reason:`端口 ${relayPort} 暂不可用，本次使用 ${port}；端口释放后会恢复`},{force:true});
-    return applyProxy(settings,file('settings-journal.json'),`http://127.0.0.1:${port}`);
+    if(!fixed) status('starting',{reason:`端口 ${relayPort} 暂不可用，本次使用 ${port}；端口释放后会恢复`},{force:true});    return applyProxy(settings,file('settings-journal.json'),`http://127.0.0.1:${port}`);
   }
   async function closeRelay() {
     const old=relay;relay=null;
     if(old) { try { await old.server.close(); } catch {} }
   }
+  // Cursor reads http.proxy once and keeps using that address, so a changed
+  // value is ignored until the process restarts. Upstream cursor-byok does the
+  // same thing: when the settings are not the ones it wants, it ends Cursor
+  // before writing them, and Cursor picks the proxy up as it reopens. This is
+  // the step that makes a switch feel immediate; without it Cursor only notices
+  // when its own retry backoff expires.
+  // Set CURSOR_BRIDGE_NO_RESTART=1 to keep Cursor running at the cost of that
+  // delay, for example while editing something unsaved.
+  function restartCursor() {
+    if (process.env.CURSOR_BRIDGE_NO_RESTART === '1') return;
+    try {
+      if (process.platform === 'win32') {
+        // /T covers the renderer and extension-host children a proxy is used
+        // from; windowsHide keeps the supervisor's consoleless promise.
+        const killer=spawn('taskkill',['/F','/T','/IM','Cursor.exe'],{stdio:'ignore',windowsHide:true});
+        killer.on?.('error',()=>{});
+      } else if (process.platform === 'darwin') {
+        const killer=spawn('pkill',['-x','Cursor'],{stdio:'ignore',windowsHide:true});
+        killer.on?.('error',()=>{});
+      }
+    } catch { /* Cursor may not be running; that is not a failure */ }
+  }
+  // Called once per applied change, never per pass: a rewrite with the same
+  // address leaves Cursor alone.
+  let cursorRestarted=false;
+  function ensureCursorReadsNewProxy(changed) {
+    if(!changed || cursorRestarted) return;
+    cursorRestarted=true;
+    restartCursor();
+  }
+  // A disconnect and the next connect are two separate changes, each of which
+  // Cursor has to notice.
+  function allowCursorRestart() { cursorRestarted=false; }
   function ensureWatch() {
     if (process.env.CURSOR_BRIDGE_NO_WATCHDOG === '1') return;
     // The watchdog is the only thing that revives a killed supervisor, so a
@@ -230,7 +268,11 @@ if(command==='status') {
             // otherwise never be rewritten; readers rely on the heartbeat.
             status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid});
           }
-          try {applyProxy(settings,file('settings-journal.json'),publicProxy());} catch(e) {
+          try {
+            // Only a real change needs Cursor restarted: a rewrite of the same
+            // address happens every pass and must stay silent.
+            ensureCursorReadsNewProxy(applyProxy(settings,file('settings-journal.json'),publicProxy()));
+          } catch(e) {
             await stop();paused=true;lastConfig=raw;throw e;
           }
         }
