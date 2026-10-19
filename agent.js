@@ -156,9 +156,11 @@ async function setup(fs, path, spawn, root) {
 }
 
 function launch(path, spawn, runtime, release, root) {
+  // Stay in Magpie's process tree. A detached process has no parent, so memory
+  // cleaners treat it as idle and kill it; Cursor then keeps dialing a dead port.
   const child = spawn(runtime, [path.join(release, 'bridge.js'), 'supervise'], {
-    cwd: release, detached: true, stdio: 'ignore', windowsHide: true,
-    env: {...process.env, CURSOR_BRIDGE_ROOT: root}
+    cwd: release, stdio: 'ignore', windowsHide: true,
+    env: {...process.env, CURSOR_BRIDGE_ROOT: root, CURSOR_BRIDGE_NO_WATCHDOG: '1'}
   });
   child.on?.('error', () => {});
   child.unref?.();

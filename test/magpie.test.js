@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {wired, readWired, switchedOff, agentId, candidates} from '../lib/magpie.js';
+import {wired, readWired, switchedOff, nextMagpieGate, agentId, candidates} from '../lib/magpie.js';
 
 const temp = t => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'magpie-state-test-'));
@@ -48,6 +48,19 @@ test('a state file without this plugin is not a switch', t => {
   write(file, [{id: 'codex', wired: true}]);
   assert.equal(wired(file), null);
   assert.equal(switchedOff(path.dirname(file)), false);
+});
+
+test('a missing wired flag does not stop a bridge that has not seen it on', () => {
+  assert.deepEqual(nextMagpieGate(null, false), {hold: false, next: null});
+  assert.deepEqual(nextMagpieGate(null, null), {hold: false, next: null});
+});
+
+test('switching off after it was on holds the bridge down until it is on again', () => {
+  assert.deepEqual(nextMagpieGate(true, false), {hold: true, next: false});
+  assert.deepEqual(nextMagpieGate(false, false), {hold: true, next: false});
+  assert.deepEqual(nextMagpieGate(false, true), {hold: false, next: true});
+  // A brief unreadable state file must not look like a disconnect.
+  assert.deepEqual(nextMagpieGate(true, null), {hold: false, next: true});
 });
 
 test('readWired picks the first readable state file', t => {

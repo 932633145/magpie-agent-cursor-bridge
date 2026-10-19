@@ -42,6 +42,9 @@ test('turning the agent on starts the bridge without an explicit setup step', ()
   const body = text.slice(text.indexOf('export function connect'));
   assert.match(body, /start\(\)/, 'connect must start the bridge');
   assert.match(text, /'supervise'/, 'a staged release is started as the supervisor');
+  const launch = text.slice(text.indexOf('function launch'), text.indexOf('function sourceDirectory'));
+  assert.doesNotMatch(launch, /detached:\s*true/, 'the supervisor stays in Magpie\'s process tree');
+  assert.match(launch, /CURSOR_BRIDGE_NO_WATCHDOG/, 'Magpie itself restarts a dead child, so no second supervisor');
   assert.match(text, /'setup'/, 'a first run falls back to setup');
   assert.match(text, /supervisor\.lock/, 'an already running supervisor is reused');
 });

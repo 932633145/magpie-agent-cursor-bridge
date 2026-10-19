@@ -7,8 +7,9 @@ import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {atomic,applyProxy,restoreProxy,clearStaleProxy} from './lib/settings.js';
 import {validate,gatewayModels} from './lib/config.js';
-import {claim,release} from './lib/lock.js';
-import {switchedOff} from './lib/magpie.js';
+import {claim,held,release} from './lib/lock.js';
+import {readWired, nextMagpieGate} from './lib/magpie.js';
+import {shouldRevive} from './lib/watch.js';
 
 const packageDir=path.dirname(fileURLToPath(import.meta.url));
 const version=JSON.parse(fs.readFileSync(path.join(packageDir,'package.json'),'utf8')).version;
@@ -45,7 +46,10 @@ if(command==='status') {
   // Pid reuse made a crashed supervisor look alive forever; the lock now pins
   // the owner's start time and reclaims itself when that process is gone.
   const owner=claim(lock);
-  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0,pausedRetries=0;
+  // Windows has no service manager here: a hidden process that is killed does
+  // not come back on its own, and Cursor is left dialing a closed port.
+  ensureWatch();
+  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0,pausedRetries=0,magpieGate=null;
   // Roughly a minute of retries at the 2s loop, then the journal is dropped and
   // the bridge reclaims the proxy keys, which is what the user expects anyway.
   const pauseLimit=30;
@@ -99,6 +103,16 @@ if(command==='status') {
     });
     applyProxy(settings,file('settings-journal.json'),ready.proxy);
   }
+  function ensureWatch() {
+    if (process.env.CURSOR_BRIDGE_NO_WATCHDOG === '1') return;
+    try {
+      const child=spawn(process.execPath,[fileURLToPath(import.meta.url),'watch'],{
+        detached:true,stdio:'ignore',windowsHide:true,
+        env:{...process.env,CURSOR_BRIDGE_ROOT:root,CURSOR_BRIDGE_SETTINGS:settings}
+      });
+      child.unref();
+    } catch { /* the next supervise start tries again */ }
+  }
   const signals=process.platform==='win32'?['SIGINT','SIGBREAK']:['SIGTERM','SIGINT'];
   for(const signal of signals) process.on(signal,()=>{ending=true;});
   // A supervisor must never leave Cursor pointed at a proxy that is gone: that
@@ -120,9 +134,12 @@ if(command==='status') {
     while(!ending) {
       try {
         // Magpie switches an agent off in its own state, leaving this plugin's
-        // config untouched. Without this check the bridge keeps serving and
-        // Cursor keeps showing Magpie's models after the user disconnected.
-        if(switchedOff()) {
+        // config untouched. A missing `wired` flag also appears after Magpie
+        // restarts, so only an on-to-off transition stops the bridge; otherwise
+        // toggling it back on could never bring the proxy up again.
+        const gate=nextMagpieGate(magpieGate, readWired());
+        magpieGate=gate.next;
+        if(gate.hold) {
           await stop();
           status('disconnected',{reason:'已在 Magpie 中关闭接入'},{force:true});
           paused=false;lastConfig='';lastModels=0;
@@ -172,4 +189,36 @@ if(command==='status') {
   } finally {
     await stop();status('stopped',{},{force:true});release(lock,owner);
   }
-} else {throw new Error('usage: node bridge.js status|supervise|restore');}
+} else if(command==='watch') {
+  if (process.env.CURSOR_BRIDGE_NO_WATCHDOG === '1') process.exit(0);
+  fs.mkdirSync(root,{recursive:true,mode:0o700});
+  let watchOwner;
+  try { watchOwner=claim(file('watchdog.lock')); }
+  catch { process.exit(0); }
+  let ending=false;
+  const signals=process.platform==='win32'?['SIGINT','SIGBREAK']:['SIGTERM','SIGINT'];
+  for (const signal of signals) process.on(signal,()=>{ending=true;});
+  const script=fileURLToPath(import.meta.url);
+  while(!ending) {
+    let revive=false;
+    try {
+      if(!held(path.join(file('supervisor.lock'),'owner.json'))) {
+        let recorded=null;
+        try { recorded=JSON.parse(fs.readFileSync(file('status.json'),'utf8')); } catch {}
+        revive=shouldRevive(recorded);
+      }
+    } catch { revive=false; }
+    if(revive) {
+      try {
+        const child=spawn(process.execPath,[script,'supervise'],{
+          detached:true,stdio:'ignore',windowsHide:true,
+          env:{...process.env,CURSOR_BRIDGE_ROOT:root,CURSOR_BRIDGE_SETTINGS:settings}
+        });
+        child.unref();
+        fs.appendFileSync(file('watchdog.log'),`${new Date().toISOString()} relaunch\n`);
+      } catch {}
+      await wait(15000);
+    } else await wait(5000);
+  }
+  release(file('watchdog.lock'),watchOwner);
+} else {throw new Error('usage: node bridge.js status|supervise|restore|watch');}

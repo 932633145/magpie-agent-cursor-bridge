@@ -6,7 +6,7 @@ fs.writeFileSync(settings,original);fs.mkdirSync(path.join(root,'data/ca'),{recu
 const c=JSON.parse(fs.readFileSync(path.join(os.homedir(),'.config/magpie-cursor-bridge/connection.json')));
 const config=path.join(root,'connection.json');const write=c=>fs.writeFileSync(config,JSON.stringify(c),{mode:0o600});write({});
 const delay=ms=>new Promise(r=>setTimeout(r,ms));let child;
-const start=()=>{child=spawn(process.execPath,[fileURLToPath(new URL('../bridge.js',import.meta.url)),'supervise'],{env:{...process.env,CURSOR_BRIDGE_ROOT:root,CURSOR_BRIDGE_SETTINGS:settings},stdio:['ignore','ignore','pipe']});child.stderr.on('data',d=>process.stderr.write(d));};
+const start=()=>{child=spawn(process.execPath,[fileURLToPath(new URL('../bridge.js',import.meta.url)),'supervise'],{env:{...process.env,CURSOR_BRIDGE_ROOT:root,CURSOR_BRIDGE_SETTINGS:settings,CURSOR_BRIDGE_NO_WATCHDOG:'1'},stdio:['ignore','ignore','pipe']});child.stderr.on('data',d=>process.stderr.write(d));};
 async function until(fn,label){for(let i=0;i<60;i++){try{const v=fn();if(v)return v;}catch{}await delay(500);}throw new Error('timeout '+label+' '+JSON.stringify(state()));}
 const state=()=>JSON.parse(fs.readFileSync(path.join(root,'status.json')));
 try {
