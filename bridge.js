@@ -8,6 +8,7 @@ import {createInterface} from 'node:readline';
 import {atomic,applyProxy,restoreProxy,clearStaleProxy} from './lib/settings.js';
 import {validate,gatewayModels} from './lib/config.js';
 import {claim,release} from './lib/lock.js';
+import {switchedOff} from './lib/magpie.js';
 
 const packageDir=path.dirname(fileURLToPath(import.meta.url));
 const version=JSON.parse(fs.readFileSync(path.join(packageDir,'package.json'),'utf8')).version;
@@ -118,6 +119,16 @@ if(command==='status') {
     status('starting',{reason:'正在启动后台桥接'},{force:true});
     while(!ending) {
       try {
+        // Magpie switches an agent off in its own state, leaving this plugin's
+        // config untouched. Without this check the bridge keeps serving and
+        // Cursor keeps showing Magpie's models after the user disconnected.
+        if(switchedOff()) {
+          await stop();
+          status('disconnected',{reason:'已在 Magpie 中关闭接入'},{force:true});
+          paused=false;lastConfig='';lastModels=0;
+          if(!ending) await wait(2000);
+          continue;
+        }
         const raw=fs.existsSync(file('connection.json'))?fs.readFileSync(file('connection.json'),'utf8'):'{}';
         const c=validate(JSON.parse(raw));
         if(!c) {await stop();status('disconnected',{}, {force:true});paused=false;lastConfig='';}
