@@ -36,7 +36,7 @@ function start() {
     if (alive(fs, path, execFileSync, root)) { watch(fs, path, root, Date.now()); return; }
     const release = staged(fs, path, root);
     const launched = Date.now();
-    if (release) { launch(spawn, chooseRuntime(fs, release), release, root); watch(fs, path, root, launched); return; }
+    if (release) { launch(path, spawn, chooseRuntime(fs, path, release), release, root); watch(fs, path, root, launched); return; }
     await setup(fs, path, spawn, root);
     watch(fs, path, root, launched);
   }).catch(error => {
@@ -124,7 +124,7 @@ function staged(fs, path, root) {
   }
 }
 
-function chooseRuntime(fs, release) {
+function chooseRuntime(fs, path, release) {
   const name = process.platform === 'win32' ? 'runtime.exe' : 'runtime';
   // setup copies the runtime into the release, so the bridge needs nothing global.
   const copy = path.join(release, 'bin', name);
@@ -151,7 +151,7 @@ async function setup(fs, path, spawn, root) {
   });
 }
 
-function launch(spawn, runtime, release, root) {
+function launch(path, spawn, runtime, release, root) {
   const child = spawn(runtime, [path.join(release, 'bridge.js'), 'supervise'], {
     cwd: release, detached: true, stdio: 'ignore', windowsHide: true,
     env: {...process.env, CURSOR_BRIDGE_ROOT: root}

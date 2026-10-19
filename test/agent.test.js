@@ -77,6 +77,25 @@ test('the supervisor runs on the runtime copy inside the staged release', () => 
   assert.match(text, /installation\.json/);
 });
 
+test('every helper that joins paths takes path as a parameter', () => {
+  const text = fs.readFileSync(source, 'utf8');
+  // agent.js may not import node:path at module scope, because the plugin
+  // sandbox can load the module with no built-ins. Each helper therefore either
+  // receives `path` from start() or imports it locally. A helper that used
+  // path.join without doing either threw "path is not defined", which meant
+  // connect() could never start the bridge.
+  for (const match of text.matchAll(/^function\s+(\w+)\s*\(([^)]*)\)\s*\{/gm)) {
+    const [, name, params] = match;
+    const rest = text.slice(match.index + match[0].length);
+    const next = rest.search(/^function\s+\w+\s*\(/m);
+    const body = next < 0 ? rest : rest.slice(0, next);
+    if (!/\bpath\./.test(body)) continue;
+    const takesIt = /\bpath\b/.test(params);
+    const importsIt = /(?:const|let|var)\s+path\s*=/.test(body) || /import\([^)]*node:path/.test(body);
+    assert.ok(takesIt || importsIt, `function ${name} uses path.* without taking or importing it`);
+  }
+});
+
 test('the embedded logo is a decodable PNG, not a hand-edited string', () => {
   const text = fs.readFileSync(source, 'utf8');
   const icon = text.match(/icon:\s*"data:image\/png;base64,([^"]+)"/)[1];
