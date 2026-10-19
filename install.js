@@ -4,11 +4,28 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {atomic,restoreProxy} from './lib/settings.js';
-import {paths,run,verifyPackage,initializeCertificate,stage,activate,stopJob} from './lib/install.js';
+import {paths,run,verifyPackage,initializeCertificate,stage,activate,stopJob,label} from './lib/install.js';
 const source=path.dirname(fileURLToPath(import.meta.url));
 const manifest=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8'));
 const command=process.argv[2]||'setup';
-const p=paths(os.homedir());
+// agent.js passes CURSOR_BRIDGE_ROOT when it falls back to setup(), and tests
+// rely on it to install into a scratch tree. Ignoring it made "isolated" runs
+// rewrite the real profile: installation.json, the release dir and the Startup
+// entry all landed in the user's home, and a second supervisor came up.
+const rooted=process.env.CURSOR_BRIDGE_ROOT;
+const p=pathed(paths(os.homedir()));
+function pathed(base) {
+  if (!rooted) return base;
+  // stage() puts releases under p.target, so a rooted install keeps them there.
+  return {
+    ...base,
+    root: rooted,
+    target: rooted,
+    startupScript: process.platform === 'win32'
+      ? path.join(rooted, 'Startup', `${label}.vbs`)
+      : base.startupScript
+  };
+}
 
 function findMagpie() {
   if (process.env.MAGPIE_PATH && fs.existsSync(process.env.MAGPIE_PATH)) return process.env.MAGPIE_PATH;

@@ -11,6 +11,9 @@ import {paths,verifyPackage,initializeCertificate,stage,activate,plistText,label
 
 const isWin = process.platform === 'win32';
 const source=fileURLToPath(new URL('..',import.meta.url));
+// Read from the manifest instead of repeating the number: a release bump used to
+// break these tests, so nobody bumped it and installed machines never upgraded.
+const version=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8')).version;
 const binName = isWin ? 'bin/cursor-magpie-bridge.exe' : 'bin/cursor-magpie-bridge';
 const engine=path.join(source,binName);
 const temp=t=>{
@@ -58,11 +61,11 @@ test('fresh machines generate distinct CAs without a BYOK install, database or t
  fs.unlinkSync(path.join(one,'ca/ca.crt'));assert.notEqual(init(one).status,0);assert.equal(hash(path.join(one,'ca/ca.key')),before);
 });
 
-test('package and native engine have the same pinned version and digest',()=>{assert.equal(verifyPackage(source).version,'0.2.2');});
+test('package and native engine have the same pinned version and digest',()=>{assert.equal(verifyPackage(source).version,version);});
 
 test('a JavaScript release verifies against its pinned engine build, not its own number',t=>{
-  // The native engine's version is compiled in, so a JS-only release (0.2.2)
-  // ships an engine that still reports 0.2.1. integrity.json pins both.
+  // The native engine's version is compiled in, so a JS-only release ships an
+  // engine that still reports 0.2.1. integrity.json pins both.
   const manifest=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8'));
   const checksums=JSON.parse(fs.readFileSync(path.join(source,'integrity.json'),'utf8'));
   assert.notEqual(checksums.engine_version,manifest.version,'fixture should differ, or this proves nothing');
@@ -120,9 +123,22 @@ test('service plist escapes paths and uses an installed runtime, independent of 
  assert.match(xml,/A &amp; B/);assert.match(xml,/A &lt; B/);assert.doesNotMatch(xml,/nvm|\.cache/);
 });
 
+test('a scratch home never writes the Startup entry of the real profile',t=>{
+ if (!isWin) return;
+ // paths() used to read APPDATA unconditionally, so a test with a temp home
+ // overwrote the real Startup script with a path into %TEMP%. The temp tree was
+ // deleted when the test finished, so every later login started nothing at all.
+ const scratch=paths(temp(t));
+ const real=path.join(process.env.APPDATA,'Microsoft/Windows/Start Menu/Programs/Startup',`${label}.vbs`);
+ assert.notEqual(scratch.startupScript,real);
+ assert.ok(scratch.startupScript.startsWith(scratch.home),'the entry stays inside the scratch home');
+ const own=paths(os.homedir());
+ assert.match(own.startupScript,/Start Menu[\\/]Programs[\\/]Startup/,'the real profile keeps the real entry');
+});
+
 test('complete staging never overwrites an existing running release',t=>{
  const p=paths(temp(t));const fakeRuntime=path.join(p.home,'runtime');fs.writeFileSync(fakeRuntime,'test');
- const one=stage(source,p,'0.2.2',fakeRuntime),two=stage(source,p,'0.2.2',fakeRuntime);
+ const one=stage(source,p,version,fakeRuntime),two=stage(source,p,version,fakeRuntime);
  assert.notEqual(one,two);assert.equal(hash(path.join(one,binName)),hash(engine));
  assert.ok(fs.existsSync(path.join(two,'node_modules/jsonc-parser/package.json')));
  const runtimeFile = path.join(two, isWin ? 'bin/runtime.exe' : 'bin/runtime');
@@ -135,7 +151,7 @@ test('failed activation restores previous launch configuration and restarts prev
    const p=paths(temp(t));
    // Never touch the real Startup folder from a test; Windows can lock it mid-run.
    p.startupScript=path.join(p.home,'AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup',`${label}.vbs`);
-   const release=stage(source,p,'0.2.2',process.execPath);
+   const release=stage(source,p,version,process.execPath);
    let ran=false;
    const exec=(cmd,args)=>{if(cmd==='wscript.exe') ran=true; return {status:0};};
    await activate(p,release,'',exec);
@@ -159,8 +175,8 @@ test('GitHub installation supports a dependency hoisted by Magpie Bun',t=>{
    fs.cpSync(path.join(source,name),path.join(plugin,name),{recursive:true});
  }
  fs.cpSync(path.dirname(createRequire(import.meta.url).resolve('jsonc-parser/package.json')),path.join(parent,'jsonc-parser'),{recursive:true});
- assert.equal(verifyPackage(plugin).version,'0.2.2');
+ assert.equal(verifyPackage(plugin).version,version);
  const runtime=path.join(home,'runtime');fs.writeFileSync(runtime,'test');
- const release=stage(plugin,paths(home),'0.2.2',runtime);
+ const release=stage(plugin,paths(home),version,runtime);
  assert.ok(fs.existsSync(path.join(release,'node_modules/jsonc-parser/package.json')));
 });

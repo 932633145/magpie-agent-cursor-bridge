@@ -36,7 +36,7 @@ function start() {
     if (alive(fs, path, execFileSync, root)) { watch(fs, path, root, Date.now()); return; }
     const release = staged(fs, path, root);
     const launched = Date.now();
-    if (release) { launch(path, spawn, chooseRuntime(fs, path, release), release, root); watch(fs, path, root, launched); return; }
+    if (release) { launch(fs, path, spawn, chooseRuntime(fs, path, release), release, root); watch(fs, path, root, launched); return; }
     await setup(fs, path, spawn, root);
     watch(fs, path, root, launched);
   }).catch(error => {
@@ -69,18 +69,24 @@ function watch(fs, path, root, since) {
 
 // A Magpie connect() is one shot: nothing runs afterwards, so a supervisor that
 // later dies stays dead until the user toggles the agent again. That is left to
-// the watchdog built into bridge.js, which the supervisor starts for itself.
+// the watchdog built into bridge.js, which the supervisor starts for itself --
+// so launch() must not disable it.
 
-// Never let a diagnostics write decide whether connect() succeeded.
-function report(error) {
+// Never let a diagnostics write decide whether connect() succeeded. spawn()
+// failures have no other trace, so the injected fs/path are used when the caller
+// already imported them.
+function report(error, fs, path, root) {
   try {
+    const write = (fs, path, root) => {
+      fs.mkdirSync(root, {recursive: true, mode: 0o700});
+      fs.writeFileSync(path.join(root, 'autostart.log'), `${new Date().toISOString()} ${error?.message || error}\n`, {flag: 'a'});
+    };
+    if (fs && path && root) { write(fs, path, root); return; }
     // A relative specifier keeps the module importable before connect() runs.
     import('node:fs').then(async fs => {
       const os = await import('node:os');
       const path = await import('node:path');
-      const root = process.env.CURSOR_BRIDGE_ROOT || path.join(os.homedir(), '.config', 'magpie-cursor-bridge');
-      fs.mkdirSync(root, {recursive: true, mode: 0o700});
-      fs.writeFileSync(path.join(root, 'autostart.log'), `${new Date().toISOString()} ${error?.message || error}\n`, {flag: 'a'});
+      write(fs, path, process.env.CURSOR_BRIDGE_ROOT || path.join(os.homedir(), '.config', 'magpie-cursor-bridge'));
     }).catch(() => {});
   } catch {}
 }
@@ -115,14 +121,34 @@ function alive(fs, path, execFileSync, root) {
   }
 }
 
-// The release install.js staged, when its bridge and engine both survive.
+// The release install.js staged, when it matches the plugin that is asking for
+// it. Magpie replaces this plugin's files from GitHub without touching
+// installation.json, so the recorded release can belong to an older plugin: an
+// old release carries an old bridge.js, which on Windows has no watchdog at all
+// and therefore stays dead after its first exit. A version mismatch must fall
+// back to setup() and stage a release that actually matches these files.
 function staged(fs, path, root) {
   try {
-    const release = JSON.parse(fs.readFileSync(path.join(root, 'installation.json'), 'utf8')).release;
+    const record = JSON.parse(fs.readFileSync(path.join(root, 'installation.json'), 'utf8'));
+    const release = record.release;
     if (!release) return null;
     if (!fs.existsSync(path.join(release, 'bridge.js'))) return null;
     if (!fs.existsSync(path.join(release, 'bin'))) return null;
+    // Without the plugin's own version there is nothing to compare against, so
+    // keep the release: refusing it would reinstall on every single connect.
+    const manifest = manifestVersion(fs, path);
+    if (manifest && record.version !== manifest) return null;
     return release;
+  } catch {
+    return null;
+  }
+}
+
+// The plugin version, read next to agent.js. Missing or malformed means unknown.
+function manifestVersion(fs, path) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(sourceDirectory(path), 'package.json'), 'utf8'));
+    return typeof manifest.version === 'string' ? manifest.version : null;
   } catch {
     return null;
   }
@@ -155,14 +181,19 @@ async function setup(fs, path, spawn, root) {
   });
 }
 
-function launch(path, spawn, runtime, release, root) {
+function launch(fs, path, spawn, runtime, release, root) {
   // Stay in Magpie's process tree. A detached process has no parent, so memory
   // cleaners treat it as idle and kill it; Cursor then keeps dialing a dead port.
+  // The supervisor is started with its own watchdog enabled: connect() runs once
+  // per toggle, so nothing else would ever restart a supervisor that dies later.
   const child = spawn(runtime, [path.join(release, 'bridge.js'), 'supervise'], {
     cwd: release, stdio: 'ignore', windowsHide: true,
-    env: {...process.env, CURSOR_BRIDGE_ROOT: root, CURSOR_BRIDGE_NO_WATCHDOG: '1'}
+    env: {...process.env, CURSOR_BRIDGE_ROOT: root}
   });
-  child.on?.('error', () => {});
+  // spawn reports a runtime that cannot execute here, not by throwing. Recording
+  // it is the only trace a failed launch leaves: without this the toggle reads
+  // "connected" while no supervisor exists and Cursor shows its own models.
+  child.on?.('error', error => report(error, fs, path, root));
   child.unref?.();
 }
 

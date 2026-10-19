@@ -46,10 +46,13 @@ if(command==='status') {
   // Pid reuse made a crashed supervisor look alive forever; the lock now pins
   // the owner's start time and reclaims itself when that process is gone.
   const owner=claim(lock);
+  // Declared before the first call: ensureWatch() reads these, and a `let` that
+  // is still in its temporal dead zone throws instead of reading undefined.
+  let watchSpawnedAt=0;
+  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0,pausedRetries=0,magpieGate=null;
   // Windows has no service manager here: a hidden process that is killed does
   // not come back on its own, and Cursor is left dialing a closed port.
   ensureWatch();
-  let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0,pausedRetries=0,magpieGate=null;
   // Roughly a minute of retries at the 2s loop, then the journal is dropped and
   // the bridge reclaims the proxy keys, which is what the user expects anyway.
   const pauseLimit=30;
@@ -99,19 +102,35 @@ if(command==='status') {
       const lines=createInterface({input:engine.stdout});
       lines.on('line',line=>{try{const msg=JSON.parse(line);if(msg.event==='ready'){clearTimeout(timer);resolve(msg);}}catch{}});
       engine.once('error',()=>{clearTimeout(timer);reject(new Error('cannot start bridge engine'));});
-      engine.once('exit',(code,signal)=>{clearTimeout(timer);reject(new Error(`bridge engine stopped (${signal||code}); check certificate trust`));});
+      // Only a start that never reported ready is described here, and the exit
+      // code alone does not prove the cause: 107 showed up on a machine whose CA
+      // was trusted all along. Say what actually happened and let the reader
+      // decide; the engine writes its own reason to stderr.
+      engine.once('exit',(code,signal)=>{clearTimeout(timer);reject(new Error(`bridge engine exited before ready (${signal||code})`));});
     });
     applyProxy(settings,file('settings-journal.json'),ready.proxy);
   }
   function ensureWatch() {
     if (process.env.CURSOR_BRIDGE_NO_WATCHDOG === '1') return;
+    // The watchdog is the only thing that revives a killed supervisor, so a
+    // single attempt at startup is not enough: it can lose the race against a
+    // previous watchdog that still holds the lock, and then exits silently and
+    // nothing ever tries again. Re-check every loop and retry.
+    if (watchAlive()) return;
+    if (Date.now()-watchSpawnedAt < 15000) return;
+    watchSpawnedAt=Date.now();
     try {
       const child=spawn(process.execPath,[fileURLToPath(import.meta.url),'watch'],{
         detached:true,stdio:'ignore',windowsHide:true,
         env:{...process.env,CURSOR_BRIDGE_ROOT:root,CURSOR_BRIDGE_SETTINGS:settings}
       });
       child.unref();
-    } catch { /* the next supervise start tries again */ }
+    } catch { /* the next pass tries again */ }
+  }
+  // A live watchdog holds watchdog.lock with its pid and start time, and claim()
+  // reclaims a stale one, so the recorded owner is the only honest signal.
+  function watchAlive() {
+    return held(file('watchdog.lock/owner.json'));
   }
   const signals=process.platform==='win32'?['SIGINT','SIGBREAK']:['SIGTERM','SIGINT'];
   for(const signal of signals) process.on(signal,()=>{ending=true;});
@@ -132,6 +151,9 @@ if(command==='status') {
     // readers must not mistake that gap for the previous run's state.
     status('starting',{reason:'正在启动后台桥接'},{force:true});
     while(!ending) {
+      // Kept outside the try below: a watchdog that cannot be started must never
+      // be the reason the proxy stops serving.
+      try { ensureWatch(); } catch {}
       try {
         // Magpie switches an agent off in its own state, leaving this plugin's
         // config untouched. A missing `wired` flag also appears after Magpie

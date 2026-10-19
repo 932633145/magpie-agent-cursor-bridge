@@ -44,9 +44,39 @@ test('turning the agent on starts the bridge without an explicit setup step', ()
   assert.match(text, /'supervise'/, 'a staged release is started as the supervisor');
   const launch = text.slice(text.indexOf('function launch'), text.indexOf('function sourceDirectory'));
   assert.doesNotMatch(launch, /detached:\s*true/, 'the supervisor stays in Magpie\'s process tree');
-  assert.match(launch, /CURSOR_BRIDGE_NO_WATCHDOG/, 'Magpie itself restarts a dead child, so no second supervisor');
+  // connect() runs once per toggle, so the supervisor it starts owns the only
+  // watchdog. Disabling it here left a killed supervisor dead forever.
+  assert.doesNotMatch(launch, /CURSOR_BRIDGE_NO_WATCHDOG/, 'the supervisor must start its own watchdog');
   assert.match(text, /'setup'/, 'a first run falls back to setup');
   assert.match(text, /supervisor\.lock/, 'an already running supervisor is reused');
+});
+
+test('a release staged by an older plugin is replaced instead of launched', () => {
+  // Magpie replaces this plugin's files from GitHub but never rewrites
+  // installation.json. Launching the recorded release then runs the previous
+  // plugin's bridge.js, which on Windows has no watchdog: one exit and the
+  // bridge stays down while Magpie still shows the agent as connected.
+  const text = fs.readFileSync(source, 'utf8');
+  const staged = text.slice(text.indexOf('function staged'), text.indexOf('function manifestVersion'));
+  assert.match(staged, /record\.version\s*!==\s*manifest/, 'a version mismatch must be detected');
+  assert.match(staged, /return null/, 'a mismatched release falls back to setup()');
+  assert.match(text, /function manifestVersion/, 'the plugin version is read next to agent.js');
+});
+
+test('a launch that never spawns is recorded instead of swallowed', () => {
+  const text = fs.readFileSync(source, 'utf8');
+  const launch = text.slice(text.indexOf('function launch'), text.indexOf('function sourceDirectory'));
+  // spawn failures do not throw; an empty handler leaves no evidence at all.
+  assert.doesNotMatch(launch, /child\.on\?\.\('error',\s*\(\)\s*=>\s*\{\s*\}\)/, 'an empty error handler hides the cause');
+  assert.match(launch, /report\(error/, 'the spawn error goes to autostart.log');
+});
+
+test('an engine that exits before ready is not reported as a certificate problem', () => {
+  const text = fs.readFileSync(path.join(path.dirname(source), 'bridge.js'), 'utf8');
+  // Exit code 107 was reported as "check certificate trust" on a machine whose
+  // CA was trusted; the hint sent every reader down the wrong path.
+  assert.doesNotMatch(text, /check certificate trust/);
+  assert.match(text, /bridge engine exited before ready/);
 });
 
 test('connect() answers immediately instead of blocking on startup', () => {
