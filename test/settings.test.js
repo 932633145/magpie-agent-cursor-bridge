@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {applyProxy,restoreProxy,document} from '../lib/settings.js';
+import {applyProxy,restoreProxy,document,clearStaleProxy} from '../lib/settings.js';
 const setup=t=>{const dir=fs.mkdtempSync(path.join(os.tmpdir(),'cursor-bridge-test-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return [path.join(dir,'settings.json'),path.join(dir,'undo.json')];};
 test('connect/disconnect restores typed settings, noProxy and comments',t=>{
  const [s,j]=setup(t);fs.writeFileSync(s,'{\n // my settings\n "http.noProxy": ["localhost"],\n "http.proxySupport":"override",\n "editor.fontSize":16,\n}\n');
@@ -26,3 +26,24 @@ test('malformed settings stay intact and retain crash recovery journal',t=>{
  assert.throws(()=>restoreProxy(j),/invalid/);assert.ok(fs.existsSync(j));assert.equal(fs.readFileSync(s,'utf8'),'{"broken"');
 });
 test('recovery is idempotent',t=>{const [s,j]=setup(t);applyProxy(s,j,'http://127.0.0.1:1234');restoreProxy(j);assert.deepEqual(restoreProxy(j),[]);});
+
+test('a bridge proxy with no journal is still removed on disconnect',t=>{
+  // Turning the agent off must give Cursor its own model list back. Without
+  // this, a crash or a paused reclaim left the proxy keys pointing at a closed
+  // port, and Cursor kept the Magpie catalogue while being unable to reach it.
+  const [s,j]=setup(t);
+  fs.writeFileSync(s,JSON.stringify({'window.autoDetectColorScheme':true,'editor.fontSize':15}));
+  applyProxy(s,j,'http://127.0.0.1:1234');
+  assert.equal(document(s).data['http.proxy'],'http://127.0.0.1:1234');
+  fs.unlinkSync(j); // the journal is gone, as after a hard kill
+  const removed=clearStaleProxy(s);
+  assert.ok(removed.includes('http.proxy'));
+  assert.deepEqual(document(s).data,{'window.autoDetectColorScheme':true,'editor.fontSize':15});
+});
+
+test('a proxy the user configured by hand is never removed',t=>{
+  const [s]=setup(t);
+  fs.writeFileSync(s,JSON.stringify({'http.proxy':'http://corp-proxy:8080','editor.fontSize':14}));
+  assert.deepEqual(clearStaleProxy(s),[]);
+  assert.equal(document(s).data['http.proxy'],'http://corp-proxy:8080');
+});

@@ -5,7 +5,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
-import {atomic,applyProxy,restoreProxy} from './lib/settings.js';
+import {atomic,applyProxy,restoreProxy,clearStaleProxy} from './lib/settings.js';
 import {validate,gatewayModels} from './lib/config.js';
 import {claim,release} from './lib/lock.js';
 
@@ -52,7 +52,13 @@ if(command==='status') {
     // Restore before stopping the listener so Cursor does not point at a dead port.
     const old=child;child=null;ready=null;
     try {
-      return restoreProxy(file('settings-journal.json'));
+      const journal=file('settings-journal.json');
+      // Turning the agent off must hand Cursor its own model list back. A
+      // journal is the accurate undo, but it can be missing after a crash or a
+      // paused reclaim, and then the proxy keys would stay pointed at a port
+      // that is about to close.
+      if(fs.existsSync(journal)) return restoreProxy(journal);
+      return clearStaleProxy(settings);
     } finally {
       if(old && old.exitCode===null && old.signalCode===null) {
         if(process.platform==='win32') {
@@ -98,7 +104,10 @@ if(command==='status') {
   // turns every request into "failed to establish a socket connection" with no
   // hint about the cause. Interactive stop() runs on signals; this covers the
   // abrupt exits signals cannot see (SIGHUP on console close, fatal errors).
-  const panic=()=>{try{restoreProxy(file('settings-journal.json'));}catch{}};
+  const panic=()=>{try{
+    const journal=file('settings-journal.json');
+    if(fs.existsSync(journal)) restoreProxy(journal); else clearStaleProxy(settings);
+  }catch{}};
   process.on('exit',panic);
   process.on('uncaughtException',error=>{panic();status('error',{reason:error?.message||String(error)},{force:true});process.exit(1);});
   process.on('unhandledRejection',()=>{/* keep serving; a single request must not stop the proxy */});
