@@ -32,8 +32,13 @@ function start() {
     const path = await import('node:path');
     const {spawn, execFileSync} = await import('node:child_process');
     const root = process.env.CURSOR_BRIDGE_ROOT || path.join(os.homedir(), '.config', 'magpie-cursor-bridge');
-    // A live supervisor already keeps Cursor pointed at the bridge.
-    if (alive(fs, path, execFileSync, root)) { watch(fs, path, root, Date.now()); return; }
+    // A live supervisor already keeps Cursor pointed at the bridge, but only
+    // when it runs this plugin's version. Upgrading the plugin in Magpie leaves
+    // the old supervisor holding the lock, and returning early on "alive" made
+    // every upgrade a no-op: the version check in staged() was never reached.
+    if (alive(fs, path, execFileSync, root) && runningVersion(fs, path, root) === null) {
+      watch(fs, path, root, Date.now()); return;
+    }
     const release = staged(fs, path, root);
     const launched = Date.now();
     if (release) { launch(fs, path, spawn, chooseRuntime(fs, path, release), release, root); watch(fs, path, root, launched); return; }
@@ -119,6 +124,22 @@ function alive(fs, path, execFileSync, root) {
   } catch {
     return true;
   }
+}
+
+// The version of the supervisor that is actually serving, as published in
+// status.json. Null means it matches this plugin (or cannot be told apart), so
+// the caller may reuse it; a string means an older plugin is still in charge and
+// the release has to be rebuilt before the next launch.
+function runningVersion(fs, path, root) {
+  const mine = manifestVersion(fs, path);
+  if (!mine) return null;
+  let state;
+  try { state = JSON.parse(fs.readFileSync(path.join(root, 'status.json'), 'utf8')); } catch { return null; }
+  const theirs = typeof state.version === 'string' ? state.version : null;
+  // A status without a version cannot be attributed, so it is not evidence of a
+  // stale supervisor; reinstalling on it would fight a healthy bridge.
+  if (!theirs || theirs === mine) return null;
+  return theirs;
 }
 
 // The release install.js staged, when it matches the plugin that is asking for

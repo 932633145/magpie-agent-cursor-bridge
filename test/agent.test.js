@@ -51,6 +51,31 @@ test('turning the agent on starts the bridge without an explicit setup step', ()
   assert.match(text, /supervisor\.lock/, 'an already running supervisor is reused');
 });
 
+test('an upgrade replaces a live supervisor from an older plugin', () => {
+  // Magpie replaces this plugin's files from GitHub and the old supervisor keeps
+  // holding its lock, so "a supervisor is alive" was true after every upgrade and
+  // start() returned before staged() could notice the version mismatch: upgrading
+  // in Magpie silently did nothing.
+  const text = fs.readFileSync(source, 'utf8');
+  const start = text.slice(text.indexOf('function start'), text.indexOf('function watch'));
+  assert.match(start, /runningVersion\(/, 'a live supervisor must be checked for its version');
+  assert.match(start, /alive\([\s\S]*&&[\s\S]*runningVersion\([\s\S]*===\s*null/, 'only a matching version is reused');
+  // The helper body ends where the next documented function begins.
+  const from = text.indexOf('function runningVersion');
+  const check = text.slice(from, text.indexOf('// The release install.js staged', from));
+  assert.match(check, /state\.version/, 'the serving version comes from status.json');
+  assert.match(check, /return theirs/, 'a different version is reported so setup() runs');
+});
+
+test('a status without a version never forces a reinstall', () => {
+  // Returning a mismatch for an unattributable status would rebuild the release
+  // on every connect from a plugin that cannot tell versions apart.
+  const text = fs.readFileSync(source, 'utf8');
+  const from = text.indexOf('function runningVersion');
+  const check = text.slice(from, text.indexOf('// The release install.js staged', from));
+  assert.match(check, /if \(!theirs \|\| theirs === mine\) return null/, 'unknown or equal versions are reused');
+});
+
 test('a release staged by an older plugin is replaced instead of launched', () => {
   // Magpie replaces this plugin's files from GitHub but never rewrites
   // installation.json. Launching the recorded release then runs the previous

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.2.6
+
+Magpie replaces this plugin's files from GitHub but never rewrites the record of
+the installed release, so after an update the supervisor on disk was still the
+previous plugin's. `start()` asked whether a supervisor was alive and, when the
+old one still held its lock, returned before anything compared versions: an
+upgrade from the Magpie plugin page silently kept running the old build, and the
+toggle still read connected.
+
+### Fixed
+
+- A live supervisor is reused only when it runs the plugin's own version. The
+  version it publishes in `status.json` is compared with `package.json`, and a
+  mismatch falls through to `setup()`, which stops the old supervisor and stages
+  a release matching the files that are actually installed. Upgrading in Magpie
+  now takes effect on the next toggle instead of requiring a manual install.
+- A `status.json` without a version is not treated as a mismatch. An older
+  supervisor cannot be attributed that way, and rebuilding on it would fight a
+  healthy bridge on every connect.
+
 ## 0.2.5
 
 Cursor reads `http.proxy` once and keeps using that address, so writing the
