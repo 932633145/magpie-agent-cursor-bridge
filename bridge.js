@@ -144,20 +144,18 @@ if(command==='status') {
     const old=relay;relay=null;
     if(old) { try { await old.server.close(); } catch {} }
   }
-  // Cursor reads http.proxy once and keeps using that address, so a changed
-  // value is ignored until the process restarts. Upstream cursor-byok does the
-  // same thing: when the settings are not the ones it wants, it ends Cursor
-  // before writing them, and Cursor picks the proxy up as it reopens. This is
-  // the step that makes a switch feel immediate; without it Cursor only notices
-  // when its own retry backoff expires.
-  // Set CURSOR_BRIDGE_NO_RESTART=1 to keep Cursor running at the cost of that
-  // delay, for example while editing something unsaved.
-  function restartCursor() {
-    if (process.env.CURSOR_BRIDGE_NO_RESTART === '1') return;
+  // Cursor reads http.proxy once and keeps using that address until something
+  // makes it reload its window. Killing Cursor for a toggle was the wrong trade:
+  // the user loses every open editor to save a few seconds, and the restart is
+  // what produced the 499s seen in the gateway log. The relay already keeps the
+  // published address constant across engine restarts, so a toggle does not even
+  // change the value Cursor holds -- re-reading is enough, and a reload costs no
+  // unsaved work. CURSOR_BRIDGE_RESTART_CURSOR=1 restores the old kill for
+  // anyone who prefers it.
+  function reloadCursor() {
+    if (process.env.CURSOR_BRIDGE_RESTART_CURSOR !== '1') return;
     try {
       if (process.platform === 'win32') {
-        // /T covers the renderer and extension-host children a proxy is used
-        // from; windowsHide keeps the supervisor's consoleless promise.
         const killer=spawn('taskkill',['/F','/T','/IM','Cursor.exe'],{stdio:'ignore',windowsHide:true});
         killer.on?.('error',()=>{});
       } else if (process.platform === 'darwin') {
@@ -172,7 +170,7 @@ if(command==='status') {
   function ensureCursorReadsNewProxy(changed) {
     if(!changed || cursorRestarted) return;
     cursorRestarted=true;
-    restartCursor();
+    reloadCursor();
   }
   // A disconnect and the next connect are two separate changes, each of which
   // Cursor has to notice.

@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.7
+
+A toggle restarted Cursor to make it re-read `http.proxy`, which cost every open
+editor and put the gateway's 499s in the log while the model list still took its
+time. The upgrade path also left two things behind: the real Startup entry still
+named the previous release, and the previous release's watchdog kept running.
+
+### Changed
+
+- A connect or disconnect no longer restarts Cursor. The relay already keeps the
+  published address constant, so a toggle does not change the value Cursor holds;
+  `CURSOR_BRIDGE_RESTART_CURSOR=1` restores the old kill for anyone who wants it.
+  `CURSOR_BRIDGE_NO_RESTART` is gone, since not restarting is now the default.
+
+### Fixed
+
+- An automatic install no longer redirects the Startup entry. `connect()` passed
+  `CURSOR_BRIDGE_ROOT`, and `pathed()` treats that as an isolated install, so the
+  entry was written into a private folder while the real one kept pointing at the
+  release it was meant to replace: the next login started the old build. The
+  variable is now forwarded only when the caller set it themselves.
+- Upgrading stops the previous watchdog. It holds its own lock and outlives the
+  supervisor it guards, so stopping only `supervisor.lock` left the old release's
+  watchdog watching a directory that had already been replaced.
+- `activate` reads the Startup entry back and fails when it does not name the
+  release being installed, instead of reporting success.
+
 ## 0.2.6
 
 Magpie replaces this plugin's files from GitHub but never rewrites the record of

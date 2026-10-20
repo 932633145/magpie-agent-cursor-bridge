@@ -51,6 +51,47 @@ test('turning the agent on starts the bridge without an explicit setup step', ()
   assert.match(text, /supervisor\.lock/, 'an already running supervisor is reused');
 });
 
+test('a toggle never kills Cursor', () => {
+  // Restarting Cursor to make it re-read http.proxy cost the user every open
+  // editor and produced the 499s in the gateway log, without making the model
+  // list arrive any sooner in practice.
+  const text = fs.readFileSync(path.join(path.dirname(source), 'bridge.js'), 'utf8');
+  const reload = text.slice(text.indexOf('function reloadCursor'), text.indexOf('function ensureCursorReadsNewProxy'));
+  assert.match(reload, /CURSOR_BRIDGE_RESTART_CURSOR !== '1'/, 'killing Cursor is opt-in, not the default');
+  const first = reload.indexOf('if (process.env.CURSOR_BRIDGE_RESTART_CURSOR');
+  const kill = reload.indexOf('taskkill');
+  assert.ok(first > -1 && first < kill, 'the opt-in check guards the kill');
+  // The published address is what Cursor holds, so it must not move per toggle.
+  assert.match(text, /const relayPort=/, 'the relay keeps one published address');
+});
+
+test('an automatic install does not move the startup entry out of the real profile', () => {
+  // CURSOR_BRIDGE_ROOT exists so tests can install into a scratch tree. Passing
+  // the real root from connect() made pathed() redirect the Startup entry into a
+  // private folder, so an upgrade left the real entry pointing at the release it
+  // was supposed to replace -- and the next login started the old build.
+  const text = fs.readFileSync(source, 'utf8');
+  const setup = text.slice(text.indexOf('async function setup'), text.indexOf('function launch'));
+  assert.match(setup, /if \(process\.env\.CURSOR_BRIDGE_ROOT\) env\.CURSOR_BRIDGE_ROOT = root/, 'isolation is forwarded only when the caller asked for it');
+  assert.match(setup, /delete env\.CURSOR_BRIDGE_ROOT/, 'a real install runs without the isolation root');
+});
+
+test('an upgrade stops the previous watchdog, not only the supervisor', () => {
+  // The watchdog keeps its own lock and outlives the supervisor it guards, so
+  // stopping just the supervisor left the previous release's watchdog running.
+  const text = fs.readFileSync(path.join(path.dirname(source), 'lib/install.js'), 'utf8');
+  const stop = text.slice(text.indexOf('export async function stopJob'), text.indexOf('export async function bootstrap'));
+  assert.match(stop, /watchdog\.lock/, 'the watchdog lock is stopped too');
+  assert.match(stop, /supervisor\.lock/, 'the supervisor is still stopped');
+});
+
+test('a startup entry that names another release fails the install', () => {
+  const text = fs.readFileSync(path.join(path.dirname(source), 'lib/install.js'), 'utf8');
+  const activate = text.slice(text.indexOf('export async function activate'), text.length);
+  assert.match(activate, /written\.includes\(release\)/, 'the entry is read back and checked');
+  assert.match(activate, /启动项未指向本次发布/, 'a mismatch is reported instead of ignored');
+});
+
 test('an upgrade replaces a live supervisor from an older plugin', () => {
   // Magpie replaces this plugin's files from GitHub and the old supervisor keeps
   // holding its lock, so "a supervisor is alive" was true after every upgrade and

@@ -190,9 +190,15 @@ async function setup(fs, path, spawn, root) {
   if (!fs.existsSync(installer)) return;
   const runtime = magpieBun(fs, path) || process.execPath;
   await new Promise(resolve => {
+    // CURSOR_BRIDGE_ROOT is a test-isolation switch, not an install location:
+    // passing the real root here made pathed() move the startup entry into a
+    // private Startup folder, so an upgrade left the real one pointing at the
+    // previous release. Only forward it when the caller set it themselves.
+    const env = {...process.env};
+    if (process.env.CURSOR_BRIDGE_ROOT) env.CURSOR_BRIDGE_ROOT = root;
+    else delete env.CURSOR_BRIDGE_ROOT;
     const child = spawn(runtime, [installer, 'setup'], {
-      cwd: here, detached: true, stdio: 'ignore', windowsHide: true,
-      env: {...process.env, CURSOR_BRIDGE_ROOT: root}
+      cwd: here, detached: true, stdio: 'ignore', windowsHide: true, env
     });
     child.on?.('error', resolve);
     child.on?.('exit', resolve);
