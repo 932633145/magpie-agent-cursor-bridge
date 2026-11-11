@@ -11,7 +11,8 @@
 
 ### 验证范围
 
-- 发布前须由 macOS CI 完成 Rust 与隔离 Node 测试并替换旧 macOS 二进制，具体构建记录随预发布附件提供。
+- GitHub Actions macOS 15 arm64 构建通过：197 个 Rust 测试、70 个隔离 Node 测试全部通过；产物通过 arm64 架构、系统动态库依赖与代码签名检查。构建记录：https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566 。
+- macOS 发布二进制 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；引擎自报版本仍为 `0.2.1`。Windows 本地隔离 Node 测试 70/70 通过，Windows 引擎哈希保持 beta-7 不变。
 - 尚未实测 Cursor 3.29.15 / 3.26.16 GUI、macOS 27.2 和系统证书安装；不能将自动化测试通过等同于真实 GUI Agent 已验证。更新后需 Reload Window 并新建对话，详情见 README。
 
 ## 0.2.8-beta-7

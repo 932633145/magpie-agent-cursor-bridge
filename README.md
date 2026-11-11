@@ -12,8 +12,8 @@
 
 ## 当前版本与验证范围
 
-- `0.2.8-beta-8`：补齐 Apple Silicon macOS 原生引擎的构建与发布流程，应用当前完整 `source.patch`，包含 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连及子智能体处理。发布前由 GitHub Actions 的 macOS arm64 runner 执行原生与隔离 Node 测试；构建来源和 SHA-256 随预发布附件提供。Windows 二进制沿用 beta-7。
-- **验证边界**：macOS 自动化构建和测试不等于 Cursor GUI 实测；Cursor 3.29.15 / 3.26.16、macOS 27.2、钥匙串信任安装和真实工具/子智能体轮次仍需用户验证。旧版出现过“安装成功、模型目录可见，但 GUI Agent 不工作”，因此不能只以 connected 或模型列表作为验收标准。
+- `0.2.8-beta-8`：补齐 Apple Silicon macOS 原生引擎的构建与发布流程，应用当前完整 `source.patch`，包含 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连及子智能体处理。[GitHub Actions macOS 15 arm64 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566)已通过 197 个 Rust 测试和 70 个隔离 Node 测试，以及 arm64 架构、系统动态库依赖、代码签名检查。macOS 引擎 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；构建来源随预发布附件提供。Windows 二进制沿用 beta-7。
+- **验证边界**：代码签名检查只确认产物签名结构有效，不代表 Apple Developer ID 身份签名或公证。macOS 自动化构建和测试不等于 Cursor GUI 实测；Cursor 3.29.15 / 3.26.16、macOS 27.2、钥匙串信任安装和真实工具/子智能体轮次仍需用户验证。旧版出现过“安装成功、模型目录可见，但 GUI Agent 不工作”，因此不能只以 connected 或模型列表作为验收标准。
 - `0.2.8-beta-7`：Windows 引擎处理子智能体请求缺少 `message_id` 或仅携带一个父请求头的情况。Windows 发布引擎已构建；新增 Rust 回归测试未运行，一次子智能体任务已完成，但尚未独立核实该任务经过此桥接，也不能证明每种协议边界都已验证。
 - `0.2.8-beta-6`：模型目录刷新临时失败时，保留仍健康的引擎和代理，避免因此主动断开 Cursor。
 - beta-7 及更早预览版的新增原生修复只进入 Windows x64 二进制，macOS 引擎当时未重建；下文历史说明中的“macOS 未重建”均指对应旧版，不代表 beta-8 的发布范围。
