@@ -11,6 +11,7 @@
 
 - 固定原生基线 `2068ab20513288e6a0289d33febe872a30608610`，Windows x64 与 macOS arm64 均重新构建。两平台先证明旧适配器上的 3 个输出回归测试全部失败，再验证修复后 218 个 Rust 测试、70 个隔离 Node 测试全部通过，包含 `tool_round` 完整工具轮次集成测试。
 - 构建记录：[Windows](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986695)、[macOS](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986591)。原生引擎自报版本仍为 `0.2.1`。macOS 架构、系统动态库依赖与签名结构检查通过，不代表 Developer ID 签名或公证。
+- 2026-11-11 在 Windows 11 / Cursor 3.27.22 / Magpie 0.1.3770 中，通过 Magpie 安装 Git 候选，由 Supervisor 自动暂存并切换发布后进行真实 GUI 验收。临时项目的 3 个 Shell 调用和 1 个 Read 全部完成：小输出正常；退出码 7 的预期失败保留错误状态；295,139 字节 / 2,401 行长输出保留文件引用，模型通过 Read 找回内联截断范围外的随机值，下一轮无需工具即可准确复述。桥接数据库核对两轮 completed、6 次模型请求 completed/HTTP 200，截图与证据只保留本机。
 - 回归夹具来自协议字段及客户端实现分析，并非报告者失败请求的抓包；不能据此认定 Issue #10 的特定 stdout 现象只有这一原因。macOS GUI 上的新修复尚未独立实测。
 - 本次 beta-9 **仅含 Shell 输出修复和构建验证改进**，不含此前撤回的独立设置页、高级模型配置或实验性本地 Tab；相关尝试仍保留在独立功能分支。
 
