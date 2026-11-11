@@ -906,10 +906,62 @@ index dae5cf5..b7fe93b 100644
          );
          let prepared = tokio::select! {
 diff --git a/server/src/cursor/protocol/proto.rs b/server/src/cursor/protocol/proto.rs
-index 0d40c98..1693ff7 100644
+index 0d40c98..3be47fe 100644
 --- a/server/src/cursor/protocol/proto.rs
 +++ b/server/src/cursor/protocol/proto.rs
-@@ -53,6 +53,22 @@ pub mod aiserver {
+@@ -26,6 +26,51 @@ pub mod aiserver {
+             pub data_binary: Vec<u8>,
+         }
+ 
++        // Validated subset of Cursor's completion wire schema. The full extracted
++        // aiserver proto contains duplicate declarations and cannot be compiled.
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct CursorPosition {
++            #[prost(int32, tag="1")] pub line: i32,
++            #[prost(int32, tag="2")] pub column: i32,
++        }
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct CurrentFileInfo {
++            #[prost(string, tag="1")] pub relative_workspace_path: String,
++            #[prost(string, tag="2")] pub contents: String,
++            #[prost(message, optional, tag="3")] pub cursor_position: Option<CursorPosition>,
++            #[prost(string, tag="5")] pub language_id: String,
++            #[prost(int32, tag="9")] pub contents_start_at_line: i32,
++            #[prost(message, repeated, tag="16")] pub cells: Vec<NotebookCell>,
++            #[prost(bool, tag="18")] pub rely_on_filesync: bool,
++        }
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct NotebookCell {}
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct StreamCppRequest {
++            #[prost(message, optional, tag="1")] pub current_file: Option<CurrentFileInfo>,
++            #[prost(string, optional, tag="18")] pub workspace_id: Option<String>,
++        }
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct LineRange {
++            #[prost(int32, tag="1")] pub start_line_number: i32,
++            #[prost(int32, tag="2")] pub end_line_number_inclusive: i32,
++        }
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct StreamCppResponse {
++            #[prost(string, tag="1")] pub text: String,
++            #[prost(bool, optional, tag="4")] pub done_stream: Option<bool>,
++            #[prost(message, optional, tag="11")] pub range_to_replace: Option<LineRange>,
++            #[prost(bool, optional, tag="13")] pub done_edit: Option<bool>,
++        }
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct CppConfigResponse {
++            #[prost(bool, optional, tag="5")] pub is_on: Option<bool>,
++            #[prost(bool, optional, tag="6")] pub is_ghost_text: Option<bool>,
++            #[prost(bool, optional, tag="7")] pub should_let_user_enable_cpp_even_if_not_pro: Option<bool>,
++            #[prost(int32, tag="11")] pub global_debounce_duration_millis: i32,
++            #[prost(int32, tag="12")] pub client_debounce_duration_millis: i32,
++        }
++
+         /// Commit message generation request. Only the fields the local
+         /// generator consumes are decoded; credentials and heavyweight context
+         /// fields are intentionally left to prost's unknown-field skipping.
+@@ -53,6 +98,22 @@ pub mod aiserver {
              pub commit_message: String,
          }
  

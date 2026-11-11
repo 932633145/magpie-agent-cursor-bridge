@@ -49,7 +49,9 @@
     return {gitModel: options.gitModel || '', gitPrompt: options.gitPrompt || '', tabMode: options.tabMode || 'forward', tabModel: options.tabModel || ''};
   }
   $('tabMode').addEventListener('change', () => { $('tabModel').required = $('tabMode').value === 'local'; });
-  $('settings').addEventListener('submit', async event => {
+  $('save').type = 'button'; // Magpie's sandbox deliberately disallows native form submission.
+  $('save').addEventListener('click', async event => {event.preventDefault();
+    if (!$('settings').reportValidity()) return;
     event.preventDefault(); $('save').disabled = true;
     try {
       const value = Object.fromEntries(['gitModel', 'gitPrompt', 'tabMode', 'tabModel'].map(key => [key, $(key).value]));
