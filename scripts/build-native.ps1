@@ -22,8 +22,14 @@ try {
     git -C $source restore --source=HEAD --worktree -- $changed
     if ($LASTEXITCODE) { throw 'Cannot prepare pre-fix regression' }
     try {
-        $red = & cargo test --manifest-path "$source/Cargo.toml" --locked -p cursor-server --test shell_output -- --test-threads=1 2>&1
-        $redExit = $LASTEXITCODE
+        # Windows PowerShell treats redirected native stderr as ErrorRecord.
+        # Cargo progress uses stderr too: capture it without terminating before
+        # the behavioral test result and exit code can be inspected.
+        $ErrorActionPreference = 'Continue'
+        try {
+            $red = & cargo test --manifest-path "$source/Cargo.toml" --locked -p cursor-server --test shell_output -- --test-threads=1 2>&1
+            $redExit = $LASTEXITCODE
+        } finally { $ErrorActionPreference = 'Stop' }
         $red | ForEach-Object { Write-Output "$_" }
         if (-not $redExit -or ($red -join "`n") -notmatch 'test result: FAILED') { throw 'Regression did not fail behaviorally on old code' }
     } finally {
