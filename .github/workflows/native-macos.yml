@@ -3,7 +3,7 @@ name: macOS arm64 native engine
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'release/**']
+    branches: [main, 'release/**', 'fix/beta9-shell-output']
     paths:
       - '.github/workflows/native-macos.yml'
       - 'source.patch'

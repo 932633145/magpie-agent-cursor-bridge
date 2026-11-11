@@ -357,7 +357,7 @@ index f069981..916f09e 100644
 +    }
 +}
 diff --git a/server/src/api/cursor/handlers.rs b/server/src/api/cursor/handlers.rs
-index 623566a..24d25ee 100644
+index 623566a..a559131 100644
 --- a/server/src/api/cursor/handlers.rs
 +++ b/server/src/api/cursor/handlers.rs
 @@ -10,7 +10,7 @@ use tower_http::decompression::RequestDecompressionLayer;
@@ -469,7 +469,7 @@ index 623566a..24d25ee 100644
      }
  }
  
-@@ -390,3 +417,27 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str> {
+@@ -390,3 +417,27 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>
          .transpose()
          .map_err(|error| crate::Error::Protocol(format!("invalid {name} header: {error}")))
  }
@@ -801,6 +801,94 @@ index 859ecc5..7d45606 100644
 +        }
 +    }
 +}
+diff --git a/server/src/cursor/compile/run.rs b/server/src/cursor/compile/run.rs
+index b3712ce..b8466f9 100644
+--- a/server/src/cursor/compile/run.rs
++++ b/server/src/cursor/compile/run.rs
+@@ -1,6 +1,7 @@
+ //! Compiles an AgentRunRequest into a PreparedRun.
+ use std::collections::BTreeMap;
+ 
++use prost::Message as _;
+ use uuid::Uuid;
+ 
+ use crate::{
+@@ -399,6 +400,28 @@ fn execution_run_id(request_id: &str) -> RunId {
+     RunId::new(format!("{request_id}:{}", &execution_id[..8]))
+ }
+ 
++fn synthetic_message_id(user: &pb::UserMessage) -> String {
++    let mut identity = user.clone();
++    identity.message_id.clear();
++    format!("synthetic:{}", BlobId::digest(&identity.encode_to_vec()).to_base64())
++}
++
++#[cfg(test)]
++mod synthetic_id_tests {
++    use super::*;
++
++    #[test]
++    fn message_identity_is_stable_and_distinguishes_content() {
++        let first = pb::UserMessage { text: "task one".into(), ..Default::default() };
++        let other = pb::UserMessage { text: "task two".into(), ..Default::default() };
++        let mut with_id = first.clone();
++        with_id.message_id = "ignored".into();
++        assert_eq!(synthetic_message_id(&first), synthetic_message_id(&first.clone()));
++        assert_eq!(synthetic_message_id(&first), synthetic_message_id(&with_id));
++        assert_ne!(synthetic_message_id(&first), synthetic_message_id(&other));
++    }
++}
++
+ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+     let conversation_mode = request
+         .conversation_state
+@@ -431,15 +454,14 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+             } else {
+                 user.mode
+             };
+-            if user.message_id.is_empty() {
+-                return Err(Error::Protocol(
+-                    "Cursor user message action has no message_id".into(),
+-                ));
++            let mut turn_user = user.clone();
++            if turn_user.message_id.is_empty() {
++                turn_user.message_id = synthetic_message_id(&turn_user);
+             }
+-            if user.text.trim() == "/summarize" {
++            if turn_user.text.trim() == "/summarize" {
+                 return Ok(ActionProjection {
+                     mode,
+-                    turn_user: Some(user.clone()),
++                    turn_user: Some(turn_user),
+                     action_context: String::new(),
+                     event_id: None,
+                     input_id: None,
+@@ -461,10 +483,10 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+                     .filter(|text| !text.is_empty())
+                     .cloned(),
+             );
+-            let input_id = format!("cursor:user:{}", user.message_id);
++            let input_id = format!("cursor:user:{}", turn_user.message_id);
+             Ok(ActionProjection {
+                 mode,
+-                turn_user: Some(user.clone()),
++                turn_user: Some(turn_user),
+                 action_context: context.join("\n\n"),
+                 event_id: None,
+                 input_id: Some(input_id),
+diff --git a/server/src/cursor/conversation/runtime.rs b/server/src/cursor/conversation/runtime.rs
+index dae5cf5..b7fe93b 100644
+--- a/server/src/cursor/conversation/runtime.rs
++++ b/server/src/cursor/conversation/runtime.rs
+@@ -628,7 +628,7 @@ fn spawn_run_request(
+         let mut checkpoint = CheckpointBuilder::new(
+             dependencies.store.clone(),
+             blob_sync.clone(),
+-            handle.parent().map(|parent| parent.tool_call_id.clone()),
++            handle.parent().and_then(|parent| parent.tool_call_id.clone()),
+             request.conversation_state.clone(),
+         );
+         let prepared = tokio::select! {
 diff --git a/server/src/cursor/protocol/proto.rs b/server/src/cursor/protocol/proto.rs
 index 0d40c98..1693ff7 100644
 --- a/server/src/cursor/protocol/proto.rs
@@ -1428,6 +1516,156 @@ index 6e06ee9..ef6f968 100644
      "/aiserver.v1.CppService/AvailableModels",
      "/aiserver.v1.CppService/RecordCppFate",
      "/aiserver.v1.FileSyncService/FSSyncFile",
+diff --git a/server/src/cursor/tools/codec/response.rs b/server/src/cursor/tools/codec/response.rs
+index ea3b679..40614d8 100644
+--- a/server/src/cursor/tools/codec/response.rs
++++ b/server/src/cursor/tools/codec/response.rs
+@@ -291,6 +291,7 @@ fn shell_exit_result(
+     let result = if exit.code == 0 && !exit.aborted {
+         pb::shell_result::Result::Success(pb::ShellSuccess {
+             working_directory: exit.cwd.clone(),
++            output_location: exit.output_location.clone(),
+             exit_code: exit.code as i32,
+             stdout: stdout.into(),
+             stderr: stderr.into(),
+@@ -303,6 +304,7 @@ fn shell_exit_result(
+     } else {
+         pb::shell_result::Result::Failure(pb::ShellFailure {
+             working_directory: exit.cwd.clone(),
++            output_location: exit.output_location.clone(),
+             exit_code: exit.code as i32,
+             stdout: stdout.into(),
+             stderr: stderr.into(),
+diff --git a/server/src/cursor/tools/tool_call_result/exec/output.rs b/server/src/cursor/tools/tool_call_result/exec/output.rs
+index 2441a5a..fa952be 100644
+--- a/server/src/cursor/tools/tool_call_result/exec/output.rs
++++ b/server/src/cursor/tools/tool_call_result/exec/output.rs
+@@ -33,7 +33,15 @@ fn shell(value: &pb::ShellResult) -> Result<(String, bool)> {
+             if let Some(folder) = value.terminals_folder.as_deref().filter(|v| !v.is_empty()) {
+                 fields.push(format!("terminals_folder={folder}"));
+             }
+-            let output = streams(&success.stdout, &success.stderr);
++            let output = shell_output(
++                &success.stdout,
++                &success.stderr,
++                success.interleaved_output.as_deref(),
++                success.output_head.as_deref(),
++                success.output_tail.as_deref(),
++                success.elided_chars,
++                success.output_location.as_ref(),
++            );
+             let prefix = format!("shell running in background {}", fields.join(" "));
+             return Ok((
+                 if output == "shell completed without output" {
+@@ -44,8 +52,29 @@ fn shell(value: &pb::ShellResult) -> Result<(String, bool)> {
+                 false,
+             ));
+         }
+-        R::Success(success) => return Ok((streams(&success.stdout, &success.stderr), false)),
+-        R::Failure(failure) => streams(&failure.stdout, &failure.stderr),
++        R::Success(success) => {
++            return Ok((
++                shell_output(
++                    &success.stdout,
++                    &success.stderr,
++                    success.interleaved_output.as_deref(),
++                    success.output_head.as_deref(),
++                    success.output_tail.as_deref(),
++                    success.elided_chars,
++                    success.output_location.as_ref(),
++                ),
++                false,
++            ))
++        }
++        R::Failure(failure) => shell_output(
++            &failure.stdout,
++            &failure.stderr,
++            failure.interleaved_output.as_deref(),
++            failure.output_head.as_deref(),
++            failure.output_tail.as_deref(),
++            failure.elided_chars,
++            failure.output_location.as_ref(),
++        ),
+         R::Timeout(timeout) => format!(
+             "shell timed out after {}ms in {}",
+             timeout.timeout_ms, timeout.working_directory
+@@ -57,6 +86,47 @@ fn shell(value: &pb::ShellResult) -> Result<(String, bool)> {
+     Ok((output, true))
+ }
+ 
++// The output file belongs to Cursor's execution environment (possibly SSH).
++// Preserve its reference; never read that path from the bridge host.
++fn shell_output(
++    stdout: &str,
++    stderr: &str,
++    interleaved: Option<&str>,
++    head: Option<&str>,
++    tail: Option<&str>,
++    elided: Option<u32>,
++    location: Option<&pb::OutputLocation>,
++) -> String {
++    let inline = if let Some(text) = interleaved.filter(|text| !text.is_empty()) {
++        Some(text.to_owned())
++    } else if !stdout.is_empty() || !stderr.is_empty() {
++        Some(streams(stdout, stderr))
++    } else if head.is_some_and(|s| !s.is_empty()) || tail.is_some_and(|s| !s.is_empty()) {
++        let mut parts = Vec::new();
++        if let Some(text) = head.filter(|s| !s.is_empty()) {
++            parts.push(text.to_owned());
++        }
++        if let Some(count) = elided.filter(|count| *count > 0) {
++            parts.push(format!("[Output excerpt: {count} characters omitted]"));
++        }
++        if let Some(text) = tail.filter(|s| !s.is_empty()) {
++            parts.push(text.to_owned());
++        }
++        Some(parts.join("\n"))
++    } else {
++        None
++    };
++    let reference = location.filter(|loc| !loc.file_path.is_empty()).map(|loc| format!(
++        "Shell output file: {} ({} bytes, {} lines). Use Cursor's Read tool in the same execution environment to inspect the file.",
++        loc.file_path, loc.size_bytes, loc.line_count));
++    match (reference, inline) {
++        (Some(reference), Some(text)) => format!("{reference}\n\n{text}"),
++        (Some(reference), None) => reference,
++        (None, Some(text)) => text,
++        (None, None) => "shell completed without output".into(),
++    }
++}
++
+ fn streams(stdout: &str, stderr: &str) -> String {
+     match (stdout.is_empty(), stderr.is_empty()) {
+         (false, false) => format!("{stdout}\n\n<stderr>\n{stderr}\n</stderr>"),
+diff --git a/server/src/cursor/transport/handle.rs b/server/src/cursor/transport/handle.rs
+index 87a0a2e..038915f 100644
+--- a/server/src/cursor/transport/handle.rs
++++ b/server/src/cursor/transport/handle.rs
+@@ -19,8 +19,8 @@ use super::{OutputHub, TransportAdmission, TransportLifecycle};
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct TransportParent {
+-    pub request_id: String,
+-    pub tool_call_id: String,
++    pub request_id: Option<String>,
++    pub tool_call_id: Option<String>,
+ }
+ 
+ #[derive(Clone)]
+@@ -81,8 +81,11 @@ impl TransportHandle {
+     }
+ 
+     pub fn set_parent(&self, parent: TransportParent) -> Result<()> {
+-        if parent.request_id.is_empty() || parent.tool_call_id.is_empty() {
+-            return Err(Error::Protocol("Cursor parent ids are required".into()));
++        if (parent.request_id.is_none() && parent.tool_call_id.is_none())
++            || parent.request_id.as_ref().is_some_and(String::is_empty)
++            || parent.tool_call_id.as_ref().is_some_and(String::is_empty)
++        {
++            return Err(Error::Protocol("Cursor parent ids must not be empty".into()));
+         }
+         if self.parent.get().is_some_and(|current| current != &parent) {
+             return Err(Error::Protocol(format!(
 diff --git a/server/src/local_app/mod.rs b/server/src/local_app/mod.rs
 index 7c50336..0bf45f1 100644
 --- a/server/src/local_app/mod.rs
@@ -2118,121 +2356,8 @@ index 80be55a..4814d57 100644
 +    let text = std::str::from_utf8(&body).unwrap();
 +    assert!(text.contains("diffs are required"));
 +}
-diff --git a/server/src/cursor/compile/run.rs b/server/src/cursor/compile/run.rs
---- a/server/src/cursor/compile/run.rs
-+++ b/server/src/cursor/compile/run.rs
-@@ -1,6 +1,7 @@
- //! Compiles an AgentRunRequest into a PreparedRun.
- use std::collections::BTreeMap;
- 
-+use prost::Message as _;
- use uuid::Uuid;
- 
- use crate::{
-@@ -399,6 +400,28 @@ fn execution_run_id(request_id: &str) -> RunId {
-     RunId::new(format!("{request_id}:{}", &execution_id[..8]))
- }
- 
-+fn synthetic_message_id(user: &pb::UserMessage) -> String {
-+    let mut identity = user.clone();
-+    identity.message_id.clear();
-+    format!("synthetic:{}", BlobId::digest(&identity.encode_to_vec()).to_base64())
-+}
-+
-+#[cfg(test)]
-+mod synthetic_id_tests {
-+    use super::*;
-+
-+    #[test]
-+    fn message_identity_is_stable_and_distinguishes_content() {
-+        let first = pb::UserMessage { text: "task one".into(), ..Default::default() };
-+        let other = pb::UserMessage { text: "task two".into(), ..Default::default() };
-+        let mut with_id = first.clone();
-+        with_id.message_id = "ignored".into();
-+        assert_eq!(synthetic_message_id(&first), synthetic_message_id(&first.clone()));
-+        assert_eq!(synthetic_message_id(&first), synthetic_message_id(&with_id));
-+        assert_ne!(synthetic_message_id(&first), synthetic_message_id(&other));
-+    }
-+}
-+
- fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
-     let conversation_mode = request
-         .conversation_state
-@@ -431,15 +438,14 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
-             } else {
-                 user.mode
-             };
--            if user.message_id.is_empty() {
--                return Err(Error::Protocol(
--                    "Cursor user message action has no message_id".into(),
--                ));
-+            let mut turn_user = user.clone();
-+            if turn_user.message_id.is_empty() {
-+                turn_user.message_id = synthetic_message_id(&turn_user);
-             }
--            if user.text.trim() == "/summarize" {
-+            if turn_user.text.trim() == "/summarize" {
-                 return Ok(ActionProjection {
-                     mode,
--                    turn_user: Some(user.clone()),
-+                    turn_user: Some(turn_user),
-                     action_context: String::new(),
-                     event_id: None,
-                     input_id: None,
-@@ -461,10 +467,10 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
-                     .filter(|text| !text.is_empty())
-                     .cloned(),
-             );
--            let input_id = format!("cursor:user:{}", user.message_id);
-+            let input_id = format!("cursor:user:{}", turn_user.message_id);
-             Ok(ActionProjection {
-                 mode,
--                turn_user: Some(user.clone()),
-+                turn_user: Some(turn_user),
-                 action_context: context.join("\n\n"),
-                 event_id: None,
-                 input_id: Some(input_id),
-diff --git a/server/src/cursor/conversation/runtime.rs b/server/src/cursor/conversation/runtime.rs
---- a/server/src/cursor/conversation/runtime.rs
-+++ b/server/src/cursor/conversation/runtime.rs
-@@ -628,7 +628,7 @@ fn spawn_run_request(
-         let mut checkpoint = CheckpointBuilder::new(
-             dependencies.store.clone(),
-             blob_sync.clone(),
--            handle.parent().map(|parent| parent.tool_call_id.clone()),
-+            handle.parent().and_then(|parent| parent.tool_call_id.clone()),
-             request.conversation_state.clone(),
-         );
-         let prepared = tokio::select! {
-diff --git a/server/src/cursor/transport/handle.rs b/server/src/cursor/transport/handle.rs
---- a/server/src/cursor/transport/handle.rs
-+++ b/server/src/cursor/transport/handle.rs
-@@ -19,8 +19,8 @@ use super::{OutputHub, TransportAdmission, TransportLifecycle};
- 
- #[derive(Clone, Debug, PartialEq, Eq)]
- pub struct TransportParent {
--    pub request_id: String,
--    pub tool_call_id: String,
-+    pub request_id: Option<String>,
-+    pub tool_call_id: Option<String>,
- }
- 
- #[derive(Clone)]
-@@ -81,8 +81,11 @@ impl TransportHandle {
-     }
- 
-     pub fn set_parent(&self, parent: TransportParent) -> Result<()> {
--        if parent.request_id.is_empty() || parent.tool_call_id.is_empty() {
--            return Err(Error::Protocol("Cursor parent ids are required".into()));
-+        if (parent.request_id.is_none() && parent.tool_call_id.is_none())
-+            || parent.request_id.as_ref().is_some_and(String::is_empty)
-+            || parent.tool_call_id.as_ref().is_some_and(String::is_empty)
-+        {
-+            return Err(Error::Protocol("Cursor parent ids must not be empty".into()));
-         }
-         if self.parent.get().is_some_and(|current| current != &parent) {
-             return Err(Error::Protocol(format!(
 diff --git a/server/tests/error_lifecycle.rs b/server/tests/error_lifecycle.rs
+index 250a937..1cea9f1 100644
 --- a/server/tests/error_lifecycle.rs
 +++ b/server/tests/error_lifecycle.rs
 @@ -601,8 +601,8 @@ async fn parent_request_does_not_need_to_resolve_to_an_active_run() {
@@ -2246,3 +2371,223 @@ diff --git a/server/tests/error_lifecycle.rs b/server/tests/error_lifecycle.rs
          }),
          None,
      )
+diff --git a/server/tests/shell_output.rs b/server/tests/shell_output.rs
+new file mode 100644
+index 0000000..790ae9e
+--- /dev/null
++++ b/server/tests/shell_output.rs
+@@ -0,0 +1,214 @@
++//! Shell output must survive the Cursor wire -> canonical tool-result boundary.
++use cursor_server::{
++    cursor::{
++        protocol::proto::agent::v1 as pb,
++        tools::{
++            codec,
++            runtime::{CursorToolRuntime, ExecContext},
++        },
++    },
++    model::ToolCall,
++};
++use prost::Message;
++use serde_json::json;
++
++fn call() -> ToolCall {
++    ToolCall {
++        index: 0,
++        call_id: "shell-output".into(),
++        model_call_id: "model:0".into(),
++        name: "Shell".into(),
++        arguments_text: String::new(),
++        arguments: json!({"command":"synthetic-fixture"}),
++        argument_error: None,
++    }
++}
++fn location() -> pb::OutputLocation {
++    pb::OutputLocation {
++        file_path: "/remote-only/output/result.txt".into(),
++        size_bytes: 50001,
++        line_count: 123,
++    }
++}
++async fn complete(message: pb::exec_client_message::Message) -> cursor_server::model::ToolResult {
++    let runtime = CursorToolRuntime::default();
++    let id = runtime
++        .reserve_exec(&call(), &ExecContext::default())
++        .await
++        .unwrap();
++    // Exercise serialization, not only construction of Rust values.
++    let wire = pb::ExecClientMessage {
++        id,
++        message: Some(message),
++        ..Default::default()
++    }
++    .encode_to_vec();
++    let decoded = pb::ExecClientMessage::decode(wire.as_slice()).unwrap();
++    match codec::client_event(&decoded, &runtime).await.unwrap() {
++        codec::ClientExecEvent::Completed(result) => result.result().clone(),
++        _ => panic!("expected completed tool result"),
++    }
++}
++#[tokio::test]
++async fn terminal_file_and_excerpt_output_survives_success_and_failure() {
++    for failed in [false, true] {
++        let result = if failed {
++            pb::shell_result::Result::Failure(pb::ShellFailure {
++                output_location: Some(location()),
++                output_head: Some("FIRST-LINE".into()),
++                output_tail: Some("LAST-LINE".into()),
++                elided_chars: Some(40000),
++                exit_code: 1,
++                ..Default::default()
++            })
++        } else {
++            pb::shell_result::Result::Success(pb::ShellSuccess {
++                output_location: Some(location()),
++                output_head: Some("FIRST-LINE".into()),
++                output_tail: Some("LAST-LINE".into()),
++                elided_chars: Some(40000),
++                ..Default::default()
++            })
++        };
++        let completion = complete(pb::exec_client_message::Message::ShellResult(
++            pb::ShellResult {
++                result: Some(result),
++                ..Default::default()
++            },
++        ))
++        .await;
++        let output = &completion.content;
++        for expected in [
++            "/remote-only/output/result.txt",
++            "50001 bytes",
++            "123 lines",
++            "FIRST-LINE",
++            "LAST-LINE",
++            "40000",
++            "Read",
++        ] {
++            assert!(output.contains(expected), "missing {expected}: {output}");
++        }
++        assert!(!output.contains("completed without output"));
++        assert_eq!(completion.is_error, failed);
++    }
++}
++#[tokio::test]
++async fn streamed_exit_preserves_file_reference_and_accumulated_output() {
++    for failed in [false, true] {
++        let runtime = CursorToolRuntime::default();
++        let id = runtime
++            .reserve_exec(&call(), &ExecContext::default())
++            .await
++            .unwrap();
++        for text in ["", "streamed marker"] {
++            let _ = codec::client_event(
++                &pb::ExecClientMessage {
++                    id,
++                    message: Some(pb::exec_client_message::Message::ShellStream(
++                        pb::ShellStream {
++                            event: Some(pb::shell_stream::Event::Stdout(pb::ShellStreamStdout {
++                                data: text.into(),
++                            })),
++                        },
++                    )),
++                    ..Default::default()
++                },
++                &runtime,
++            )
++            .await
++            .unwrap();
++        }
++        let event = codec::client_event(
++            &pb::ExecClientMessage {
++                id,
++                message: Some(pb::exec_client_message::Message::ShellStream(
++                    pb::ShellStream {
++                        event: Some(pb::shell_stream::Event::Exit(pb::ShellStreamExit {
++                            code: u32::from(failed),
++                            output_location: Some(location()),
++                            ..Default::default()
++                        })),
++                    },
++                )),
++                ..Default::default()
++            },
++            &runtime,
++        )
++        .await
++        .unwrap();
++        let codec::ClientExecEvent::Completed(completion) = event else {
++            panic!("expected completion")
++        };
++        assert!(completion
++            .result()
++            .content
++            .contains("/remote-only/output/result.txt"));
++        assert!(completion.result().content.contains("streamed marker"));
++        assert_eq!(completion.result().is_error, failed);
++        let Some(pb::tool_call::Tool::ShellToolCall(tool)) = &completion.tool_call().tool else {
++            panic!("expected Shell UI state")
++        };
++        let result = tool.result.as_ref().unwrap().result.as_ref().unwrap();
++        let file = match result {
++            pb::shell_result::Result::Success(s) => s.output_location.as_ref(),
++            pb::shell_result::Result::Failure(s) => s.output_location.as_ref(),
++            _ => panic!("unexpected result"),
++        };
++        assert_eq!(file.unwrap().file_path, location().file_path);
++    }
++}
++#[tokio::test]
++async fn output_variants_and_sandbox_errors_are_not_misreported() {
++    for (success, expected) in [
++        (
++            pb::ShellSuccess {
++                stdout: "stdout".into(),
++                stderr: "stderr".into(),
++                ..Default::default()
++            },
++            "stdout\n\n<stderr>\nstderr\n</stderr>",
++        ),
++        (
++            pb::ShellSuccess {
++                interleaved_output: Some("ordered output".into()),
++                ..Default::default()
++            },
++            "ordered output",
++        ),
++        (
++            pb::ShellSuccess {
++                output_location: Some(location()),
++                ..Default::default()
++            },
++            "Shell output file:",
++        ),
++        (
++            pb::ShellSuccess::default(),
++            "shell completed without output",
++        ),
++    ] {
++        let completion = complete(pb::exec_client_message::Message::ShellResult(
++            pb::ShellResult {
++                result: Some(pb::shell_result::Result::Success(success)),
++                ..Default::default()
++            },
++        ))
++        .await;
++        assert!(completion.content.starts_with(expected));
++        assert!(!completion.is_error);
++    }
++    let completion = complete(pb::exec_client_message::Message::ShellStream(
++        pb::ShellStream {
++            event: Some(pb::shell_stream::Event::SandboxUnsupported(
++                pb::ShellSandboxUnsupported {
++                    reason: "sandbox unavailable".into(),
++                    ..Default::default()
++                },
++            )),
++        },
++    ))
++    .await;
++    assert!(completion.is_error);
++    assert_eq!(completion.content, "sandbox unavailable");
++}
