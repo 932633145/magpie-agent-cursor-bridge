@@ -12,7 +12,7 @@
 
 ## 当前版本与验证范围
 
-- `0.2.8-beta-9`（开发中）：新增 Magpie 插件高级设置页，Git 提交信息/分支名独立模型，以及默认关闭的实验性本地 Tab 单处插入补全。Windows x64 与 macOS arm64 均须重建后才发布。当前尚未完成最终 CI 与真实 Cursor GUI 验收。
+- `0.2.8-beta-9`：新增 Magpie 插件高级设置页、Git 提交信息/分支名独立模型，以及默认关闭的实验性本地 Tab 单处插入补全。Windows x64 与 macOS arm64 均由 GitHub Actions 从同一补丁重建：每个平台通过 208 个 Rust 测试、73 个隔离 Node 测试；设置页分别通过 Chromium / WebKit 沙箱导航、保存和窄屏测试。[Windows 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42999178146) · [macOS 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42999178093)。**真实 Cursor GUI 补全显示、接受/撤销与供应商延迟、费用尚未验证，不承诺普通模型达到原生 Tab 的体验。**
 
 - `0.2.8-beta-8`：补齐 Apple Silicon macOS 原生引擎的构建与发布流程，应用当前完整 `source.patch`，包含 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连及子智能体处理。[GitHub Actions macOS 15 arm64 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566)已通过 197 个 Rust 测试和 70 个隔离 Node 测试，以及 arm64 架构、系统动态库依赖、代码签名检查。macOS 引擎 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；构建来源随预发布附件提供。Windows 二进制沿用 beta-7。
 - **验证边界**：代码签名检查只确认产物签名结构有效，不代表 Apple Developer ID 身份签名或公证。macOS 自动化构建和测试不等于 Cursor GUI 实测；Cursor 3.29.15 / 3.26.16、macOS 27.2、钥匙串信任安装和真实工具/子智能体轮次仍需用户验证。旧版出现过“安装成功、模型目录可见，但 GUI Agent 不工作”，因此不能只以 connected 或模型列表作为验收标准。
@@ -46,7 +46,7 @@
 
 - **平台支持**：安装器支持 Windows x64 和 Apple Silicon macOS；最新原生协议修复的支持范围见上方版本说明。
 - **动态模型同步**：后台约每 4 秒向 Magpie 刷新一次模型目录；Cursor 模型菜单何时更新取决于它何时重新请求目录。
-- **Git 动作本地生成**：SCM 面板的「生成提交信息」与「生成分支名」由桥接里配置的默认模型（Magpie 中为 Cursor · Magpie Bridge 选中的模型）生成，提交信息语言跟随 diff 内容，分支名输出为合法 git ref。
+- **Git 动作独立模型**：SCM 面板的「生成提交信息」与「生成分支名」默认跟随主模型，也可在高级设置中指定独立模型；默认提交提示词跟随 diff 语言，分支名输出为合法 git ref。
 - **代理配置还原**：连接时配置 Cursor 代理，断开或卸载时按日志还原桥接写入的代理项，保留检测到的外部改动。
 - **数据路径**：发往 Magpie 的模型请求经本机回环代理和本机网关转发给所选模型提供商；其他请求的转发与证书信任风险见上方安全说明。
 
@@ -97,7 +97,7 @@ github:flylink-code/magpie-agent-cursor-bridge
 
 ### macOS 系统使用步骤
 
-**beta-8 升级验收**：从 Magpie 更新 `github:flylink-code/magpie-agent-cursor-bridge` 后，确认插件版本为 `0.2.8-beta-8`，运行 `bash setup.command status` 检查服务。若旧 Supervisor 未自动升级，在更新后的插件目录执行 `bash setup.command`。不要只下载 Release 附件后覆盖正在运行的引擎，安装器需要同步暂存版本和完整性清单。
+**当前版本升级验收**：从 Magpie 更新 `github:flylink-code/magpie-agent-cursor-bridge` 后，确认插件版本为 `0.2.8-beta-9`，运行 `bash setup.command status` 检查服务。若旧 Supervisor 未自动升级，在更新后的插件目录执行 `bash setup.command`。不要只下载 Release 附件后覆盖正在运行的引擎，安装器需要同步暂存版本和完整性清单。
 
 在 Cursor 执行一次 **Developer: Reload Window**，刷新旧的运行模式缓存，再新建对话。先测普通问答和多轮，再测工具、Auto/默认模型、子智能体；同时确认 Magpie 网关确有对应模型请求，而非只确认目录可见。分别记录 Cursor 版本、结果和运行中发布目录的引擎 SHA-256。若反馈日志，只提供脱敏的错误与请求标识，不上传完整 `connection.json`、数据库、密钥或对话内容。停用后确认代理恢复。
 

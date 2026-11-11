@@ -30,7 +30,10 @@ let browser;
 try {
   browser = await browserType.launch(process.env.UI_BROWSER_EXECUTABLE ? {executablePath:process.env.UI_BROWSER_EXECUTABLE} : {});
   const page = await browser.newPage({viewport:{width:480,height:900}});
+  let entries = 0, reentered;
+  const reload = new Promise(resolve => { reentered = resolve; });
   await page.route('**/wrapper.js', async route => {
+    if (++entries === 2) reentered();
     // Exact host wrapper contract; the destination page uses real postMessage.
     const bootstrap = `window.magpie={ready:Promise.resolve(),service:'http://127.0.0.1:${port}/',options:{get:async()=>({port:${port}})}};\n`;
     await route.fulfill({contentType:'text/javascript',body:bootstrap+fs.readFileSync(path.join(ui,'wrapper.js'),'utf8')});
@@ -59,6 +62,10 @@ try {
   await frame.locator('#save').click();
   await page.waitForFunction(() => window.savedBridgeOptions?.tabMode === 'local');
   // Saving re-enters the host wrapper, then restores the saved options.
+  let reloadTimer;
+  try { await Promise.race([reload, new Promise((_,reject) => {
+    reloadTimer=setTimeout(() => reject(new Error('Settings save did not re-enter the host wrapper')),12000);
+  })]); } finally { clearTimeout(reloadTimer); }
   await frame.locator('#tabMode').filter({has:frame.locator('option:checked[value="local"]')}).waitFor({timeout:12000});
   assert.match(page.frames()[1].url(), /#entry=/);
   assert.equal(saved.port,port);assert.equal(saved.gitModel,'main');assert.equal(saved.tabModel,'tab');assert.equal(saved.tabMode,'local');
