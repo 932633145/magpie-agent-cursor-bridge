@@ -22,6 +22,8 @@ $env:CARGO_TARGET_DIR = $target
 if (-not $env:CARGO_BUILD_JOBS) { $env:CARGO_BUILD_JOBS = '2' }
 cargo test --manifest-path "$source\Cargo.toml" --locked -p cursor-server --test bridge_bidi_wire --quiet
 if ($LASTEXITCODE) { throw 'Native wire tests failed' }
+cargo test --manifest-path "$source\Cargo.toml" --locked -p cursor-server --test bridge_route --quiet
+if ($LASTEXITCODE) { throw 'Native bridge routing tests failed' }
 cargo test --manifest-path "$source\Cargo.toml" --locked -p cursor-server --test commit_message --quiet
 if ($LASTEXITCODE) { throw 'Native Git name tests failed' }
 cargo test --manifest-path "$source\Cargo.toml" --locked -p cursor-server --bin cursor-magpie-bridge --quiet

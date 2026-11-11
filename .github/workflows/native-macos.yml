@@ -1,0 +1,87 @@
+name: macOS arm64 native engine
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - '.github/workflows/native-macos.yml'
+      - 'source.patch'
+      - 'scripts/**'
+      - 'test/**'
+      - 'lib/**'
+      - 'package.json'
+      - 'npm-shrinkwrap.json'
+      - 'integrity.json'
+  pull_request:
+    paths:
+      - '.github/workflows/native-macos.yml'
+      - 'source.patch'
+      - 'scripts/**'
+      - 'test/**'
+      - 'lib/**'
+      - 'package.json'
+      - 'npm-shrinkwrap.json'
+      - 'integrity.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Inspect native toolchain
+        run: |
+          test "$(uname -m)" = arm64
+          sw_vers
+          rustc --version
+          cargo --version
+          xcodebuild -version
+          # Public dependency checkout needs no personal SSH key on hosted CI.
+          git config --global url."https://github.com/".insteadOf git@github.com:
+      - name: Install locked JavaScript dependency without lifecycle scripts
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Test and build patched native engine
+        run: bash scripts/build-native.sh
+      - name: Run plugin tests against the rebuilt engine in a scratch profile
+        env:
+          CURSOR_BRIDGE_ROOT: ${{ runner.temp }}/bridge-test-root
+          CURSOR_BRIDGE_SETTINGS: ${{ runner.temp }}/bridge-test-home/settings.json
+        run: |
+          mkdir -p "$RUNNER_TEMP/bridge-test-home"
+          HOME="$RUNNER_TEMP/bridge-test-home" node --test test/*.test.js
+      - name: Record release provenance
+        run: |
+          mkdir -p artifacts
+          cp bin/cursor-magpie-bridge integrity.json artifacts/
+          {
+            printf 'Plugin commit: '; git rev-parse HEAD
+            printf 'Native base: 2068ab20513288e6a0289d33febe872a30608610\n'
+            printf 'Target: aarch64-apple-darwin\n'
+            printf 'Deployment target: 13.0\n'
+            sw_vers
+            rustc --version
+            cargo --version
+            shasum -a 256 source.patch bin/cursor-magpie-bridge
+            file bin/cursor-magpie-bridge
+            otool -L bin/cursor-magpie-bridge
+            printf '\nValidation: Rust bridge integration/library/bin tests and Node plugin tests.\n'
+            printf 'Not validated: real Cursor GUI, account state, macOS 27.2, system certificate installation.\n'
+          } > artifacts/BUILD-INFO.txt
+          tar -czf artifacts/cursor-magpie-bridge-macos-arm64.tar.gz -C bin cursor-magpie-bridge
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cursor-magpie-bridge-macos-arm64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

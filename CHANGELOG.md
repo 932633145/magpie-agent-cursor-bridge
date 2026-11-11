@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8-beta-8
+
+### Changed
+
+- 为 Apple Silicon macOS 增加独立的 GitHub Actions 原生构建：固定 cursor-byok v1.0.1 提交并应用完整 `source.patch`，涵盖 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连和子智能体处理。
+- macOS 构建脚本先运行原生回归测试，再检查 arm64 架构、系统动态库依赖和代码签名；构建目录与源码分离，避免嵌入编译产物。
+- macOS 打包按 `engine_version` 校验原生版本，仅更新 macOS 哈希，保留 Windows 哈希；新增打包回归测试。
+- Windows 原生构建脚本补上 `bridge_route` 回归测试；本次不重建 Windows 二进制。
+
+### 验证范围
+
+- 发布前须由 macOS CI 完成 Rust 与隔离 Node 测试并替换旧 macOS 二进制，具体构建记录随预发布附件提供。
+- 尚未实测 Cursor 3.29.15 / 3.26.16 GUI、macOS 27.2 和系统证书安装；不能将自动化测试通过等同于真实 GUI Agent 已验证。更新后需 Reload Window 并新建对话，详情见 README。
+
 ## 0.2.8-beta-7
 
 ### Fixed
