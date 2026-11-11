@@ -10,9 +10,6 @@ on:
       - 'scripts/**'
       - 'test/**'
       - 'lib/**'
-      - 'ui/**'
-      - 'plugin.js'
-      - 'bridge.js'
       - 'package.json'
       - 'npm-shrinkwrap.json'
       - 'integrity.json'
@@ -23,9 +20,6 @@ on:
       - 'scripts/**'
       - 'test/**'
       - 'lib/**'
-      - 'ui/**'
-      - 'plugin.js'
-      - 'bridge.js'
       - 'package.json'
       - 'npm-shrinkwrap.json'
       - 'integrity.json'
@@ -66,14 +60,6 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/bridge-test-home"
           HOME="$RUNNER_TEMP/bridge-test-home" node --test test/*.test.js
-      - name: Test sandboxed settings in WebKit
-        env:
-          PLAYWRIGHT_REQUIRE_FROM: ${{ runner.temp }}/bridge-browser/package.json
-          UI_BROWSER: webkit
-        run: |
-          npm install --prefix "$RUNNER_TEMP/bridge-browser" --ignore-scripts --no-audit --no-fund playwright@1.57.0
-          node "$RUNNER_TEMP/bridge-browser/node_modules/playwright/cli.js" install webkit
-          node test/ui-browser.mjs
       - name: Record release provenance
         run: |
           mkdir -p artifacts

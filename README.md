@@ -12,8 +12,6 @@
 
 ## 当前版本与验证范围
 
-- `0.2.8-beta-9`：新增 Magpie 插件高级设置页、Git 提交信息/分支名独立模型，以及默认关闭的实验性本地 Tab 单处插入补全。Windows x64 与 macOS arm64 均由 GitHub Actions 从同一补丁重建：每个平台通过 208 个 Rust 测试、73 个隔离 Node 测试；设置页分别通过 Chromium / WebKit 沙箱导航、保存和窄屏测试。[Windows 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42999178146) · [macOS 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42999178093)。**真实 Cursor GUI 补全显示、接受/撤销与供应商延迟、费用尚未验证，不承诺普通模型达到原生 Tab 的体验。**
-
 - `0.2.8-beta-8`：补齐 Apple Silicon macOS 原生引擎的构建与发布流程，应用当前完整 `source.patch`，包含 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连及子智能体处理。[GitHub Actions macOS 15 arm64 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566)已通过 197 个 Rust 测试和 70 个隔离 Node 测试，以及 arm64 架构、系统动态库依赖、代码签名检查。macOS 引擎 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；构建来源随预发布附件提供。Windows 二进制沿用 beta-7。
 - **验证边界**：代码签名检查只确认产物签名结构有效，不代表 Apple Developer ID 身份签名或公证。macOS 自动化构建和测试不等于 Cursor GUI 实测；Cursor 3.29.15 / 3.26.16、macOS 27.2、钥匙串信任安装和真实工具/子智能体轮次仍需用户验证。旧版出现过“安装成功、模型目录可见，但 GUI Agent 不工作”，因此不能只以 connected 或模型列表作为验收标准。
 - `0.2.8-beta-7`：Windows 引擎处理子智能体请求缺少 `message_id` 或仅携带一个父请求头的情况。Windows 发布引擎已构建；新增 Rust 回归测试未运行，一次子智能体任务已完成，但尚未独立核实该任务经过此桥接，也不能证明每种协议边界都已验证。
@@ -46,7 +44,7 @@
 
 - **平台支持**：安装器支持 Windows x64 和 Apple Silicon macOS；最新原生协议修复的支持范围见上方版本说明。
 - **动态模型同步**：后台约每 4 秒向 Magpie 刷新一次模型目录；Cursor 模型菜单何时更新取决于它何时重新请求目录。
-- **Git 动作独立模型**：SCM 面板的「生成提交信息」与「生成分支名」默认跟随主模型，也可在高级设置中指定独立模型；默认提交提示词跟随 diff 语言，分支名输出为合法 git ref。
+- **Git 动作本地生成**：SCM 面板的「生成提交信息」与「生成分支名」由桥接里配置的默认模型（Magpie 中为 Cursor · Magpie Bridge 选中的模型）生成，提交信息语言跟随 diff 内容，分支名输出为合法 git ref。
 - **代理配置还原**：连接时配置 Cursor 代理，断开或卸载时按日志还原桥接写入的代理项，保留检测到的外部改动。
 - **数据路径**：发往 Magpie 的模型请求经本机回环代理和本机网关转发给所选模型提供商；其他请求的转发与证书信任风险见上方安全说明。
 
@@ -97,7 +95,7 @@ github:flylink-code/magpie-agent-cursor-bridge
 
 ### macOS 系统使用步骤
 
-**当前版本升级验收**：从 Magpie 更新 `github:flylink-code/magpie-agent-cursor-bridge` 后，确认插件版本为 `0.2.8-beta-9`，运行 `bash setup.command status` 检查服务。若旧 Supervisor 未自动升级，在更新后的插件目录执行 `bash setup.command`。不要只下载 Release 附件后覆盖正在运行的引擎，安装器需要同步暂存版本和完整性清单。
+**beta-8 升级验收**：从 Magpie 更新 `github:flylink-code/magpie-agent-cursor-bridge` 后，确认插件版本为 `0.2.8-beta-8`，运行 `bash setup.command status` 检查服务。若旧 Supervisor 未自动升级，在更新后的插件目录执行 `bash setup.command`。不要只下载 Release 附件后覆盖正在运行的引擎，安装器需要同步暂存版本和完整性清单。
 
 在 Cursor 执行一次 **Developer: Reload Window**，刷新旧的运行模式缓存，再新建对话。先测普通问答和多轮，再测工具、Auto/默认模型、子智能体；同时确认 Magpie 网关确有对应模型请求，而非只确认目录可见。分别记录 Cursor 版本、结果和运行中发布目录的引擎 SHA-256。若反馈日志，只提供脱敏的错误与请求标识，不上传完整 `connection.json`、数据库、密钥或对话内容。停用后确认代理恢复。
 
@@ -113,21 +111,6 @@ github:flylink-code/magpie-agent-cursor-bridge
    - 等后台桥接启动完成（几十秒），在 Cursor 中打开对话面板或点一下模型下拉框即可看到 Magpie 的模型；无需重启 Cursor。
 
 ---
-
-## 高级模型设置（beta-9）
-
-在 Magpie 侧边栏 Plugins 中打开 **Cursor Bridge 设置**，或从 Agent 行菜单进入高级设置。需要支持插件页面、本地服务和页面选项的 Magpie 版本；页面不可用时原有接入仍可使用，但不要手动修改数据库代替配置。
-
-- **Git 模型**：默认跟随 Magpie 默认模型；选择独立模型后，切换主模型、目录刷新和重启不会覆盖该选择。提交信息与分支名共用该模型。指定模型失效时报错，不静默切换或转发上游。
-- **提交提示词**：非空时覆盖本次 Git 提交生成的提示词；留空使用引擎原有提示词，保留此前数据库里的自定义提示词。
-- **Tab 现有转发**：升级默认值，保持 beta-8 的行为，不自动接管编辑器补全。
-- **Tab 本地模型（实验）**：必须显式选择模型。只读取 Cursor 请求携带的当前文件片段，使用前后文生成插入内容；最终按单行替换协议返回，不读取磁盘，不提供跨文件预测。超时（最多约 2 秒）、输出不合法、缺少上下文时返回空建议，不重试、不更换模型、不转发至其他 Tab 服务。
-- **关闭补全**：拦截补全及辅助 RPC，返回空结果，不调用模型。切换模式后可能需要 Cursor Reload Window 以刷新缓存的补全配置；不会改写 Cursor 用户的 Tab 开关。
-- **状态**：显示已保存配置和引擎确认的配置，以及实际 Git/Tab 模型。接入关闭时可保存，显示待应用。配置读失败保留上一份有效偏好，不关闭健康的 Agent 对话。
-
-偏好由 Magpie 的插件选项保存，插件宿主写出派生的 `preferences.json`，Supervisor 合并到 `effective.json`，原生引擎按请求快照使用。设置服务默认监听 `127.0.0.1:52408`；只读提供模型目录和非敏感状态，所有偏好写入均经 Magpie 的页面选项接口。不会把网关密钥交给页面。若本机端口冲突，可在插件选项中指定 `port`，远程 Magpie web 通过宿主的服务代理访问。
-
-本地补全会将代码上下文发送至所选模型供应商。桥接自身的 Tab 调用不保存请求/响应正文（即使开启引擎详细日志），但 Magpie 网关及供应商仍遵守各自日志与留存策略。请求使用稳定、哈希化的文档会话标识；OpenCode Go 等供应商的会话头是否经过 Magpie 正确透传，以及其对高频补全流量的政策，仍须实际确认。设置页不会自动发起任何付费测试请求。
 
 ## 常用管理命令
 

@@ -19,7 +19,7 @@ git -C "$bridge_build/source" apply "$bridge_package/source.patch"
 # Environment-proxy tests mutate process globals, so library tests run serially.
 cargo test --manifest-path "$bridge_build/source/Cargo.toml" --locked -p cursor-server \
   --lib --bin cursor-magpie-bridge --test bridge_bidi_wire --test bridge_route \
-  --test bridge_tab --test commit_message --test error_lifecycle -- --test-threads=1
+  --test commit_message --test error_lifecycle -- --test-threads=1
 cargo build --manifest-path "$bridge_build/source/Cargo.toml" --release --locked -p cursor-server --bin cursor-magpie-bridge
 binary="$CARGO_TARGET_DIR/release/cursor-magpie-bridge"
 file "$binary"

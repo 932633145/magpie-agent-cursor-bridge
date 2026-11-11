@@ -1,8 +1,0 @@
-<!doctype html>
-<html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cursor Bridge 高级设置</title><link rel="stylesheet" href="settings.css"></head>
-<body><main><h1>Cursor Bridge 高级设置</h1><p>对话默认模型和接入开关仍在 Magpie Agents 中设置。以下配置不修改 Cursor 原有编辑器偏好。</p>
-<form id="settings"><fieldset><legend>Git 提交信息与分支名</legend><label>生成模型<select id="gitModel"><option value="">跟随 Magpie 默认模型</option></select></label><label>自定义提交信息提示词<textarea id="gitPrompt" rows="4" maxlength="16000" placeholder="留空保留现有提示词；首次默认为跟随 diff 语言"></textarea></label></fieldset>
-<fieldset><legend>编辑器 Tab 补全</legend><label>处理方式<select id="tabMode"><option value="forward">保留现有转发</option><option value="local">本地模型（实验）</option><option value="off">关闭补全</option></select></label><label>本地补全模型<select id="tabModel"><option value="">请选择模型</option></select></label><p>实验模式仅支持当前文件的光标补全，不支持跨文件预测。超时或无合法建议时不显示补全，不会自动转发到其他服务。源代码将发送到所选模型供应商，请确认服务条款及隐私设置。</p></fieldset>
-<button type="submit" id="save">保存配置</button><span id="result" role="status" aria-live="polite"></span></form>
-<section><h2>运行状态</h2><p id="state" role="status">正在读取…</p><dl><dt>默认模型</dt><dd id="mainModel">—</dd><dt>Git 实际模型</dt><dd id="gitApplied">—</dd><dt>Tab 实际模式／模型</dt><dd id="tabApplied">—</dd><dt>配置应用</dt><dd id="applied">尚未确认</dd></dl><button id="refresh" type="button">刷新状态</button></section>
-<p>本地服务不执行安装、证书信任或任何模型测试调用。配置不含供应商密钥。</p></main><script src="settings.js"></script></body></html>

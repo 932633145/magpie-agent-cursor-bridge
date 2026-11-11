@@ -1,23 +1,5 @@
 # Changelog
 
-## 0.2.8-beta-9
-
-### Added
-
-- Magpie 插件设置页及 Agent 菜单入口：动态模型列表、Git 独立模型、提交提示词、Tab 处理方式、保存/实际应用状态。保持 `agent.js` 无宿主副作用。
-- Git 提交与分支名按请求解析指定模型，不随主模型切换而覆盖。无效模型明确失败，不静默切换。
-- 默认关闭的本地 Tab 单处插入补全：有限上下文、JSON 输出约束、UTF-16 光标和 CRLF 范围处理、2 秒预算、取消旧请求、空建议安全退出；本地/关闭模式不向 Tab 上游转发代码或文件同步请求。
-- 本地 Tab 使用哈希化的稳定会话标识，不记录调用正文；网关和供应商的日志策略另行适用。
-- Windows x64 隔离 CI；两平台共用补丁、协议与回归目标。设置页 Chromium / WebKit 窄屏浏览器测试。
-- 配置切换拒绝旧请求快照，取消同文档进行中的旧补全；按完整编辑返回，避免部分建议泄漏。设置保存后重新进入 Magpie 页面以启动新宿主，状态接口不返回 Git 提示词正文。
-
-### 验证边界
-
-- Windows x64 与 macOS arm64 在候选提交 `4637126` 上各通过 208 个 Rust 测试及 73 个隔离 Node 测试；Chromium / WebKit 设置页测试通过。两端引擎均重建，引擎自报版本仍为 `0.2.1`，以完整性清单哈希区分产物。
-- 构建记录：[Windows](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42999178146)、[macOS](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42999178093)。真实 Cursor GUI 的补全显示、接受/撤销、系统证书安装及付费供应商延迟/额度尚未实测。
-- 发布引擎 SHA-256：Windows `97811ea3d7a77658e28fe3c67f81d2041e11715b95446e4d2b3d2c5faa88e71c`；macOS `d70e4e19d05e8088d7cb909fb5706210e71289a14fa96cb49ad07a14bf33323a`。Windows checkout 的补丁文件为 CRLF，BUILD-INFO 原始哈希与 macOS LF 文件不同，已验证内容仅行尾不同。
-- 不支持 Intel macOS、Windows arm64、跨文件预测、Filesync-only 请求和 Notebook 补全。普通模型速度、供应商策略和真实请求兼容性需要实测。
-
 ## 0.2.8-beta-8
 
 ### Changed

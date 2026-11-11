@@ -12,7 +12,6 @@ import {readWired, nextMagpieGate} from './lib/magpie.js';
 import {shouldRevive} from './lib/watch.js';
 import {listenFixed} from './lib/relay.js';
 import {sourceUpdate} from './lib/upgrade.js';
-import {preferences,readPreferences} from './lib/preferences.js';
 
 // Cursor caches the proxy address it read from settings.json, so an engine that
 // takes a fresh port on every restart leaves Cursor dialing a closed one until it
@@ -58,12 +57,6 @@ if(command==='status') {
   // Declared before the first call: ensureWatch() reads these, and a `let` that
   // is still in its temporal dead zone throws instead of reading undefined.
   let watchSpawnedAt=0;
-  let rolePreferences=preferences(),preferencesError='';
-  function configured(c) {
-    try { rolePreferences=readPreferences(root); preferencesError=''; }
-    catch(error) { preferencesError=error.message; }
-    return {...c,preferences:rolePreferences};
-  }
   let child=null,ready=null,ending=false,lastConfig='',nextRefresh=0,paused=false,lastModels=0,pausedRetries=0,magpieGate=null;
   // Windows has no service manager here: a hidden process that is killed does
   // not come back on its own, and Cursor is left dialing a closed port.
@@ -285,11 +278,9 @@ if(command==='status') {
           continue;
         }
         const raw=fs.existsSync(file('connection.json'))?fs.readFileSync(file('connection.json'),'utf8'):'{}';
-        const connection=validate(JSON.parse(raw));
-        const c=connection?configured(connection):null;
-        const configSignature=JSON.stringify(c);
+        const c=validate(JSON.parse(raw));
         if(!c) {await stop();status('disconnected',{}, {force:true});paused=false;lastConfig='';}
-        else if(paused && configSignature===lastConfig) {
+        else if(paused && raw===lastConfig) {
           // The journal says another program owns the proxy keys now. That is
           // often Cursor rewriting settings.json on its own restart, not a real
           // conflict, so retry rather than staying down until a manual toggle.
@@ -302,7 +293,7 @@ if(command==='status') {
           }
         }
         else {
-          const changed=configSignature!==lastConfig;
+          const changed=raw!==lastConfig;
           if(changed || Date.now()>=nextRefresh || !child || child.exitCode!==null || child.signalCode!==null) {
             let effective;
             try {
@@ -315,7 +306,7 @@ if(command==='status') {
               if(child && child.exitCode===null && child.signalCode===null && relay && ready) {
                 nextRefresh=Date.now()+4000;
                 status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid,refreshError:error.message});
-                lastConfig=configSignature;paused=false;pausedRetries=0;
+                lastConfig=raw;paused=false;pausedRetries=0;
                 continue;
               }
               throw error;
@@ -327,19 +318,19 @@ if(command==='status') {
             if(!child || child.exitCode!==null || child.signalCode!==null) {
               await stop();await start(effective);
             } else atomic(file('effective.json'),JSON.stringify(effective));
-            lastConfig=configSignature;paused=false;lastModels=effective.models.length;pausedRetries=0;
-            status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid,preferencesError},{force:true});
+            lastConfig=raw;paused=false;lastModels=effective.models.length;pausedRetries=0;
+            status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid},{force:true});
           } else {
             // The proxy is reapplied on every pass, so an unchanged state would
             // otherwise never be rewritten; readers rely on the heartbeat.
-            status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid,preferencesError});
+            status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid});
           }
           try {
             // Only a real change needs Cursor restarted: a rewrite of the same
             // address happens every pass and must stay silent.
             ensureCursorReadsNewProxy(applyProxy(settings,file('settings-journal.json'),publicProxy()));
           } catch(e) {
-            await stop();paused=true;lastConfig=configSignature;throw e;
+            await stop();paused=true;lastConfig=raw;throw e;
           }
         }
       } catch(e) {

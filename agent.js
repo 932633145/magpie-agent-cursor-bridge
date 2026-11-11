@@ -8,7 +8,7 @@ export const agent = {
   format: "json",
   model: "model",
   ua: ["cursor-magpie-bridge"],
-  notice: "打开开关即可接管 Cursor。首次使用请先在插件目录运行 setup.ps1 完成安装（会请求信任本机证书）；之后在 Magpie 更新插件，运行中的桥接会自动升级。切换模型即时生效，无需重启；「生成提交信息」与「生成分支名」默认跟随这里的模型，可在插件高级设置中独立选择。Tab 默认保留原有转发，也可在高级设置中启用实验性本地补全或关闭。"
+  notice: "打开开关即可接管 Cursor。首次使用请先在插件目录运行 setup.ps1 完成安装（会请求信任本机证书）；之后在 Magpie 更新插件，运行中的桥接会自动升级。切换模型即时生效，无需重启；Cursor 的「生成提交信息」与「生成分支名」也使用这里选中的模型。"
 };
 
 // Magpie runs this module in moejs, not on Node: no `process`, no timers, no
