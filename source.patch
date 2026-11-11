@@ -1,3 +1,733 @@
+diff --git a/server/examples/magpie_smoke.rs b/server/examples/magpie_smoke.rs
+new file mode 100644
+index 0000000..9590ae9
+--- /dev/null
++++ b/server/examples/magpie_smoke.rs
+@@ -0,0 +1,48 @@
++//! Explicit live smoke test: args are proxy URL and catalogue model hash.
++use cursor_server::cursor::protocol::{connect,proto::{agent::v1 as pb,aiserver::v1 as ai}};
++use prost::Message;
++use futures_util::StreamExt;
++use std::time::Duration;
++async fn append(client:&reqwest::Client,id:&str,seq:i64,message:pb::AgentClientMessage) -> Result<(),Box<dyn std::error::Error>> {
++ let body=ai::BidiAppendRequest{data:hex::encode(message.encode_to_vec()),request_id:Some(ai::BidiRequestId{request_id:id.into()}),append_seqno:seq,..Default::default()};
++ let r=client.post("https://api2.cursor.sh/aiserver.v1.BidiService/BidiAppend").header("Content-Type","application/proto").body(body.encode_to_vec()).send().await?;
++ if !r.status().is_success(){return Err(format!("append {}: {}",r.status(),r.text().await?).into());} Ok(())
++}
++#[tokio::main]
++async fn main()->Result<(),Box<dyn std::error::Error>>{
++ let args:Vec<_>=std::env::args().collect();
++ let client=reqwest::Client::builder().proxy(reqwest::Proxy::all(&args[1])?).timeout(Duration::from_secs(120)).build()?;
++ let id=format!("bridge-smoke-{}",uuid::Uuid::new_v4());
++ let message=pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::RunRequest(pb::AgentRunRequest{
++ action:Some(pb::ConversationAction{action:Some(pb::conversation_action::Action::UserMessageAction(pb::UserMessageAction{user_message:Some(pb::UserMessage{text:"Reply with exactly MAGPIE_BRIDGE_OK. Do not call any tools.".into(),message_id:format!("{id}-user"),mode:pb::AgentMode::Agent as i32,..Default::default()}),..Default::default()})),..Default::default()}),
++ conversation_id:Some(id.clone()),run_id:Some(id.clone()),requested_model:Some(pb::RequestedModel{model_id:args[2].clone(),..Default::default()}),..Default::default()}))};
++ append(&client,&id,0,message).await?;
++ let response=client.post("https://api2.cursor.sh/agent.v1.AgentService/RunSSE").header("Content-Type","application/proto").body(pb::BidiRequestId{request_id:id.clone()}.encode_to_vec()).send().await?.error_for_status()?;
++ let mut stream=response.bytes_stream();let mut buffer=Vec::new();let mut seq=1;let mut text=String::new();
++ while let Some(chunk)=stream.next().await {
++  buffer.extend_from_slice(&chunk?);
++  while buffer.len()>=5 {
++   let len=u32::from_be_bytes(buffer[1..5].try_into()?) as usize;
++   if buffer.len()<len+5 {break;}
++   let frame:Vec<_>=buffer.drain(..len+5).collect();
++   if frame[0]&connect::END_STREAM_FLAG!=0 {
++    let end:serde_json::Value=serde_json::from_slice(&frame[5..])?;
++    if end.get("error").is_some(){return Err(format!("stream error: {end}").into());}
++    if !text.contains("MAGPIE_BRIDGE_OK"){return Err(format!("unexpected response: {text}").into());}
++    println!("TLS proxy -> Cursor Bidi/RunSSE -> Magpie -> model -> Cursor stream: {text}");return Ok(());
++   }
++   let server=pb::AgentServerMessage::decode(&frame[5..])?;
++   let reply=match server.message {
++    Some(pb::agent_server_message::Message::InteractionUpdate(u))=>{if let Some(pb::interaction_update::Message::TextDelta(t))=u.message{text.push_str(&t.text);}None},
++    Some(pb::agent_server_message::Message::KvServerMessage(kv))=>Some(pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::KvClientMessage(pb::KvClientMessage{id:kv.id,message:Some(pb::kv_client_message::Message::SetBlobResult(pb::SetBlobResult{error:None}))}))}),
++    Some(pb::agent_server_message::Message::ExecServerMessage(exec))=>{
++      if !matches!(exec.message,Some(pb::exec_server_message::Message::RequestContextArgs(_))){return Err("model requested an unexpected tool".into());}
++      append(&client,&id,seq,pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::ExecClientControlMessage(pb::ExecClientControlMessage{message:Some(pb::exec_client_control_message::Message::StreamClose(pb::ExecClientStreamClose{id:exec.id}))}))}).await?;seq+=1;
++      Some(pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::ExecClientMessage(pb::ExecClientMessage{id:exec.id,message:Some(pb::exec_client_message::Message::RequestContextResult(pb::RequestContextResult{result:Some(pb::request_context_result::Result::Success(pb::RequestContextSuccess{request_context:Some(pb::RequestContext::default()),..Default::default()}))})),..Default::default()}))})
++    },_=>None
++   };
++   if let Some(reply)=reply{append(&client,&id,seq,reply).await?;seq+=1;}
++  }
++ }
++ Err("stream closed before successful end".into())
++}
+diff --git a/server/prompt/cursor/commit/auto.md b/server/prompt/cursor/commit/auto.md
+new file mode 100644
+index 0000000..4c956db
+--- /dev/null
++++ b/server/prompt/cursor/commit/auto.md
+@@ -0,0 +1,65 @@
++# Git 提交信息生成指南
++
++## 角色与目标
++
++你是一个 git 提交信息生成器。给你一段 git diff，你只输出提交信息本身，不要有任何解释、前言、引号或额外文本。你的整个回复会被直接传给 `git commit`。
++
++## 通用规则（生成标题时）
++
++- 使用现在时（present tense），精准描述本次 diff 的关键改动。
++- 关注「改了什么」，而不是罗列文件名。
++- 要具体：包含具体细节（包名、版本、功能点），避免笼统表述。
++- 排除任何不必要的内容（如翻译说明）。
++- 标题最长不超过 50 个字符。
++- 提交信息语言：与本次 diff 的表达语言保持一致。判断依据依次为最近的提交信息、改动的注释与文档、新增或修改的字符串与界面文案；完全没有自然语言线索时使用英文。diff 中多种语言并存时，跟随最近的提交信息所用的语言。
++- 只输出提交信息文本本身，不要用引号或其他格式包裹，不要加解释或前言。
++
++## 输出格式（按 type 选择其一）
++
++| type               | 格式模板                                                      |
++| ------------------ | ------------------------------------------------------------ |
++| plain              | `<commit message>`                                           |
++| conventional       | `<type>[optional (<scope>)]: <commit message>`（主题须以小写字母开头） |
++| conventional+body  | `<type>[optional (<scope>)]: <commit message subject>`（主题须以小写字母开头，body 单独生成） |
++| gitmoji            | `:emoji: <commit message>`                                   |
++| subject+body       | `<commit message subject>`（body 单独生成）                  |
++
++输出必须严格符合所选 type 对应的格式。
++
++## Conventional 类型选择
++
++从下面的「类型-描述」中选择一个最贴合本次 diff 的类型。重要：类型必须全小写（例如 `feat`，而不是 `Feat` 或 `FEAT`）。
++
++```json
++{
++  "docs": "仅文档变更",
++  "style": "不影响代码含义的变更（空白、格式、缺失分号等）",
++  "refactor": "改善代码结构但不改变功能的变更（重命名、重构类/方法、抽取函数等）",
++  "perf": "提升性能的代码变更",
++  "test": "新增缺失的测试或修正已有测试",
++  "build": "影响构建系统或外部依赖的变更",
++  "ci": "对 CI 配置文件和脚本的变更",
++  "chore": "不修改 src 或 test 文件的其他变更",
++  "revert": "回退某个之前的提交",
++  "feat": "新功能",
++  "fix": "缺陷修复"
++}
++```
++
++- `conventional`：直接按上表选择类型并输出完整主题行。
++- `conventional+body`：只输出 conventional 主题行，body 会单独生成。
++
++## 描述（body）生成规则
++
++当已有提交标题、需要生成描述时，给你标题与 diff，你只输出提交描述正文：
++
++- 简洁：使用 3–6 条要点（每条一行短句），或 2–4 句短句，不要长段落。
++- 用现在时聚焦「改了什么、为什么」。
++- 每行最多 72 个字符；当某条要点换行时，续行缩进 2 个空格，与要点文字对齐。
++- 不要重复标题，不要元评论（如「本次提交……」）。
++- 语言：与提交标题所用语言一致。
++- 只输出提交描述正文，不要有其他内容。
++- 修改点要列举清楚明白，不能笼统地说“更新功能、修改资源”。
++- 提交必须有前缀，且不允许使用 emoji。如果存在多个提交功能，例如美化和缺陷修复，应拆分成多条，例如：
++  - `fix(<具体修改项>): 修复 xxx 问题`
++  - `chore(<具体修改项>): 修改美术资源`
+diff --git a/server/src/api/cursor/bidi.rs b/server/src/api/cursor/bidi.rs
+index f069981..916f09e 100644
+--- a/server/src/api/cursor/bidi.rs
++++ b/server/src/api/cursor/bidi.rs
+@@ -1,4 +1,7 @@
+ //! Accepts ordered Cursor Bidi append requests and routes them by request_id.
++use std::sync::Arc;
++
++use parking_lot::RwLock;
+ use prost::Message;
+ 
+ use crate::{
+@@ -19,6 +22,38 @@ pub struct DecodedAppend {
+     pub message: agent::AgentClientMessage,
+ }
+ 
++/// Route policy of a dedicated Magpie bridge.
++///
++/// Cursor names the model of a Run from the catalogue it last read, so a Run
++/// can ask for something the bridge does not serve: Cursor's own Auto, which
++/// travels as `default`, or a hash whose catalogue entry Magpie has since
++/// dropped. A bridge has no Cursor account, so forwarding such a Run upstream
++/// can only fail — Cursor answers `ResourceExhausted` once the signed-in
++/// account's own quota is spent, which the editor reports as "You've hit your
++/// usage limit". The bridge therefore serves those Runs with the route Magpie
++/// selected. The route is kept as Magpie's model id rather than a catalogue
++/// hash so it stays valid across catalogue replacements.
++#[derive(Clone, Default)]
++pub struct BridgeRoute {
++    selected: Arc<RwLock<Option<String>>>,
++}
++
++impl BridgeRoute {
++    pub fn new(selected: impl Into<String>) -> Self {
++        Self {
++            selected: Arc::new(RwLock::new(Some(selected.into()))),
++        }
++    }
++
++    pub fn selected(&self) -> Option<String> {
++        self.selected.read().clone()
++    }
++
++    pub fn set(&self, selected: impl Into<String>) {
++        *self.selected.write() = Some(selected.into());
++    }
++}
++
+ impl DecodedAppend {
+     pub fn model_id(&self) -> Option<&str> {
+         let agent::agent_client_message::Message::RunRequest(request) =
+@@ -40,8 +75,24 @@ impl DecodedAppend {
+             })
+     }
+ 
+-    pub fn conversation_id(&self) -> Option<&str> {
+-        let agent::agent_client_message::Message::RunRequest(request) =
++    /// Name another route for this append. Cursor sends the catalogue hash in
++    /// `requested_model` and repeats it in `model_details`; a Run only uses the
++    /// route both of them name.
++    pub fn with_model_id(mut self, model_id: &str) -> Self {
++        if let Some(agent::agent_client_message::Message::RunRequest(request)) =
++            self.message.message.as_mut()
++        {
++            if let Some(requested) = request.requested_model.as_mut() {
++                requested.model_id = model_id.into();
++            }
++            if let Some(details) = request.model_details.as_mut() {
++                details.model_id = model_id.into();
++            }
++        }
++        self
++    }
++
++    pub fn conversation_id(&self) -> Option<&str> {        let agent::agent_client_message::Message::RunRequest(request) =
+             self.message.message.as_ref()?
+         else {
+             return None;
+@@ -153,6 +204,46 @@ fn history_image_count(history: &agent::ConversationHistory) -> usize {
+         .sum()
+ }
+ 
++// Inspect only protobuf keys/lengths. Never interpret arbitrary byte fields as messages.
++fn wire_structure(payload: &[u8]) -> String {
++    fn scan(bytes: &[u8], depth: usize, budget: &mut usize, out: &mut String) {
++        use prost::encoding::{decode_key, decode_varint, skip_field, DecodeContext, WireType};
++        use std::fmt::Write;
++        let mut rest = bytes;
++        while !rest.is_empty() && *budget > 0 {
++            *budget -= 1;
++            let offset = bytes.len() - rest.len();
++            let Ok((tag, wire)) = decode_key(&mut rest) else {
++                let _ = write!(out, " d{depth}@{offset}:invalid-key");
++                return;
++            };
++            let _ = write!(out, " d{depth}@{offset}:f{tag}/{wire:?}");
++            if wire == WireType::LengthDelimited {
++                let Ok(length) = decode_varint(&mut rest) else {
++                    out.push_str(":invalid-length");
++                    return;
++                };
++                let _ = write!(out, ":len{length}");
++                if length > rest.len() as u64 {
++                    out.push_str(":truncated");
++                    return;
++                }
++                let (value, tail) = rest.split_at(length as usize);
++                // AgentClientMessage.run_request -> AgentRunRequest.conversation_state.
++                if depth < 2 && tag == 1 { scan(value, depth + 1, budget, out); }
++                rest = tail;
++            } else if skip_field(wire, tag, &mut rest, DecodeContext::default()).is_err() {
++                out.push_str(":invalid-value");
++                return;
++            }
++        }
++        if *budget == 0 { out.push_str(":limit"); }
++    }
++    let mut out = format!("bytes={}", payload.len());
++    scan(payload, 0, &mut 48, &mut out);
++    out
++}
++
+ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
+     let request_id = request
+         .request_id
+@@ -160,22 +251,28 @@ pub fn decode(request: &ai::BidiAppendRequest) -> Result<DecodedAppend> {
+         .map(|id| id.request_id.as_str())
+         .filter(|id| !id.is_empty())
+         .ok_or_else(|| Error::Protocol("BidiAppend request_id is required".into()))?;
+-    if !request.data_binary.is_empty() {
+-        return Err(Error::Protocol(
+-            "BidiAppend data_binary is not part of the captured protocol".into(),
+-        ));
+-    }
+-    if request.data.is_empty() {
+-        return Err(Error::Protocol(
++    let decoded_hex;
++    let payload = match (request.data.is_empty(), request.data_binary.is_empty()) {
++        (false, true) => {
++            decoded_hex = hex::decode(&request.data)
++                .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
++            decoded_hex.as_slice()
++        }
++        (true, false) => request.data_binary.as_slice(),
++        (true, true) => return Err(Error::Protocol(
+             "BidiAppend contains no AgentClientMessage".into(),
+-        ));
+-    }
+-    let payload = hex::decode(&request.data)
+-        .map_err(|error| Error::Protocol(format!("invalid BidiAppend hex: {error}")))?;
++        )),
++        (false, false) => return Err(Error::Protocol(
++            "BidiAppend contains both data and data_binary".into(),
++        )),
++    };
+     Ok(DecodedAppend {
+         request_id: request_id.into(),
+         seqno: request.append_seqno,
+-        message: agent::AgentClientMessage::decode(payload.as_slice())?,
++        message: agent::AgentClientMessage::decode(payload).map_err(|error| {
++            let structure = wire_structure(payload);
++            Error::Protocol(format!("Bidi protobuf decode failed: {error}; wire structure: {structure}"))
++        })?,
+     })
+ }
+ 
+@@ -209,3 +306,66 @@ pub async fn append(
+         .await?;
+     Ok(ai::BidiAppendResponse {})
+ }
++
++#[cfg(test)]
++mod bridge_structure_tests {
++    use super::*;
++
++    fn run_request(model_id: &str) -> agent::AgentClientMessage {
++        agent::AgentClientMessage {
++            message: Some(agent::agent_client_message::Message::RunRequest(
++                agent::AgentRunRequest {
++                    requested_model: Some(agent::RequestedModel {
++                        model_id: model_id.into(),
++                        ..Default::default()
++                    }),
++                    model_details: Some(agent::ModelDetails {
++                        model_id: model_id.into(),
++                        ..Default::default()
++                    }),
++                    ..Default::default()
++                },
++            )),
++        }
++    }
++
++    #[test]
++    fn a_bridge_rewrites_the_route_cursor_asked_for() {
++        let decoded = DecodedAppend {
++            request_id: "fallback".into(),
++            seqno: 0,
++            message: run_request("default"),
++        };
++        assert_eq!(decoded.model_id(), Some("default"));
++
++        let decoded = decoded.with_model_id("7baa78199217e044");
++
++        assert_eq!(decoded.model_id(), Some("7baa78199217e044"));
++        let Some(agent::agent_client_message::Message::RunRequest(request)) =
++            decoded.message.message.as_ref()
++        else {
++            panic!("rewriting preserves the Run request");
++        };
++        assert_eq!(
++            request.model_details.as_ref().map(|details| details.model_id.as_str()),
++            Some("7baa78199217e044")
++        );
++    }
++
++    #[test]
++    fn bridge_route_follows_the_route_magpie_selected() {
++        let route = BridgeRoute::new("deepseek/deepseek-flash");
++        assert_eq!(route.selected().as_deref(), Some("deepseek/deepseek-flash"));
++        route.set("kiro/claude-opus-5.5");
++        assert_eq!(route.selected().as_deref(), Some("kiro/claude-opus-5.5"));
++    }
++
++    #[test]
++    fn diagnostic_never_displays_field_values() {
++        let payload = [0x0a, 0x08, 0x0a, 0x06, 0x0a, 0x04, b'S', b'E', b'C', b'R'];
++        let result = super::wire_structure(&payload);
++        assert!(result.contains("d2@0:f1/LengthDelimited:len4"));
++        assert!(!result.contains("SECR"));
++        assert!(super::wire_structure(&[0x0a, 3, 0x0a, 1, 6]).contains("d2@0:invalid-key"));
++    }
++}
+diff --git a/server/src/api/cursor/handlers.rs b/server/src/api/cursor/handlers.rs
+index 623566a..a559131 100644
+--- a/server/src/api/cursor/handlers.rs
++++ b/server/src/api/cursor/handlers.rs
+@@ -10,7 +10,7 @@ use tower_http::decompression::RequestDecompressionLayer;
+ 
+ use crate::{
+     api::cursor::{
+-        bidi,
++        bidi::{self, BridgeRoute},
+         proxy::{self, CursorProxy},
+         run_sse,
+     },
+@@ -88,6 +88,10 @@ fn router_with_proxy(
+             "/aiserver.v1.AiService/WriteGitCommitMessage",
+             post(commit_message::write_git_commit_message),
+         )
++        .route(
++            "/aiserver.v1.AiService/WriteGitBranchName",
++            post(commit_message::write_git_branch_name),
++        )
+         .route(
+             "/aiserver.v1.NetworkService/IsConnected",
+             post(is_connected),
+@@ -228,34 +232,60 @@ async fn run_sse_handler(
+ async fn bidi_handler(
+     State(registry): State<TransportRegistry>,
+     Extension(proxy): Extension<CursorProxy>,
++    bridge_route: Option<Extension<BridgeRoute>>,
+     request: Request<Body>,
+ ) -> Result<Response<Body>> {
+     let (parts, body) = buffered(request).await?;
+     let request: ai::BidiAppendRequest = connect::decode_unary(&body)?;
+-    let decoded = bidi::decode(&request)?;
+-    let first_model = decoded.model_id().map(str::to_owned);
+-    let conversation_id = decoded.conversation_id().map(str::to_owned);
+-    let trace_metadata = decoded.trace_metadata();
+-    let trace = registry.trace(&decoded.request_id);
+-    let local = if let Some(model_id) = decoded.model_id() {
++    let mut decoded = bidi::decode(&request)?;
++    let mut upstream_model = None;
++    if let Some(model_id) = decoded.model_id().map(str::to_owned) {
+         // 插件模型 ID 只在本地有意义,永远不转发到 Cursor 官方上游。
+-        if model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
+-            || registry.store().model(model_id).await?.is_some()
+-        {
++        let served = model_id.starts_with(crate::plugin::ADAPTER_ID_PREFIX)
++            || registry.store().model(&model_id).await?.is_some();
++        if served {
+             tracing::info!(
+                 request_id = decoded.request_id,
+                 model_id,
+                 "routing Cursor Run to BYOK provider"
+             );
+-            true
++        } else if let Some(route) = bridge_route.as_ref().and_then(|route| route.selected()) {
++            let hash = registry
++                .store()
++                .models()
++                .await?
++                .into_iter()
++                .find(|model| model.model_id == route)
++                .map(|model| model.model_hash)
++                .ok_or_else(|| {
++                    crate::Error::Protocol(format!(
++                        "bridge route {route} is not in the Magpie catalogue"
++                    ))
++                })?;
++            tracing::warn!(
++                request_id = decoded.request_id,
++                requested = model_id,
++                route,
++                "Cursor selected a model the bridge does not serve; using the Magpie route"
++            );
++            decoded = decoded.with_model_id(&hash);
+         } else {
+             tracing::info!(
+                 request_id = decoded.request_id,
+                 model_id,
+                 "routing Cursor Run to Cursor upstream"
+             );
+-            false
++            upstream_model = Some(model_id);
+         }
++    }
++    let first_model = decoded.model_id().map(str::to_owned);
++    let conversation_id = decoded.conversation_id().map(str::to_owned);
++    let trace_metadata = decoded.trace_metadata();
++    let trace = registry.trace(&decoded.request_id);
++    let local = if upstream_model.is_some() {
++        false
++    } else if first_model.is_some() {
++        true
+     } else if registry.local(&decoded.request_id).await.is_some() {
+         true
+     } else if registry.upstream(&decoded.request_id).await {
+@@ -373,13 +403,10 @@ fn parent_headers(headers: &HeaderMap) -> Result<Option<TransportParent>> {
+     let tool_call_id = header_text(headers, "x-parent-agent-tool-call-id")?;
+     match (request_id, tool_call_id) {
+         (None, None) => Ok(None),
+-        (Some(request_id), Some(tool_call_id)) => Ok(Some(TransportParent {
+-            request_id: request_id.into(),
+-            tool_call_id: tool_call_id.into(),
++        (request_id, tool_call_id) => Ok(Some(TransportParent {
++            request_id: request_id.map(str::to_owned),
++            tool_call_id: tool_call_id.map(str::to_owned),
+         })),
+-        _ => Err(crate::Error::Protocol(
+-            "Cursor subagent request must include both parent headers".into(),
+-        )),
+     }
+ }
+ 
+@@ -390,3 +417,27 @@ fn header_text<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>
+         .transpose()
+         .map_err(|error| crate::Error::Protocol(format!("invalid {name} header: {error}")))
+ }
++
++#[cfg(test)]
++mod parent_header_tests {
++    use super::*;
++
++    #[test]
++    fn parent_headers_are_independent() {
++        let mut headers = HeaderMap::new();
++        assert!(parent_headers(&headers).unwrap().is_none());
++        headers.insert("x-parent-request-id", HeaderValue::from_static("request"));
++        let parent = parent_headers(&headers).unwrap().unwrap();
++        assert_eq!(parent.request_id.as_deref(), Some("request"));
++        assert_eq!(parent.tool_call_id, None);
++        headers.remove("x-parent-request-id");
++        headers.insert("x-parent-agent-tool-call-id", HeaderValue::from_static("tool"));
++        let parent = parent_headers(&headers).unwrap().unwrap();
++        assert_eq!(parent.request_id, None);
++        assert_eq!(parent.tool_call_id.as_deref(), Some("tool"));
++        headers.insert("x-parent-request-id", HeaderValue::from_static("request"));
++        let parent = parent_headers(&headers).unwrap().unwrap();
++        assert_eq!(parent.request_id.as_deref(), Some("request"));
++        assert_eq!(parent.tool_call_id.as_deref(), Some("tool"));
++    }
++}
+diff --git a/server/src/bin/cursor-magpie-bridge.rs b/server/src/bin/cursor-magpie-bridge.rs
+new file mode 100644
+index 0000000..1c22c83
+--- /dev/null
++++ b/server/src/bin/cursor-magpie-bridge.rs
+@@ -0,0 +1,225 @@
++//! Headless Cursor protocol bridge. No desktop/account writes or management API.
++use std::{path::PathBuf, sync::Arc, time::Duration};
++use cursor_server::{api, config, cursor::{prompting::{PromptAssets, PromptCompiler}, transport::TransportRegistry}, local_app::CursorHarness, model::ModelConfigInput, network::NetworkClients, plugin::{PluginRegistry, PluginRuntime}, provider::ProviderRouter, search::WebCache, store::Store};
++use serde::Deserialize;
++use serde_json::json;
++use tokio_util::sync::CancellationToken;
++
++#[derive(Deserialize)]
++struct Connection { gateway: String, key: String, model: String, models: Vec<BridgeModel> }
++#[derive(Deserialize)]
++struct BridgeModel { id: String, #[serde(default)] name: String, context: Option<u64> }
++
++/// The catalogue and the route Magpie has selected, which is also what Cursor's
++/// Git actions generate through.
++struct Catalogue { selected: String, models: Vec<ModelConfigInput> }
++
++// Cursor asks for commit messages only as diffs; the language has to follow the
++// diff itself, which neither built-in locale prompt does.
++const AUTO_COMMIT_PROMPT: &str = include_str!("../../prompt/cursor/commit/auto.md");
++
++fn catalogue(bytes: &[u8]) -> Result<Catalogue, Box<dyn std::error::Error>> {
++    let c: Connection = serde_json::from_slice(bytes)?;
++    let url = url::Url::parse(&c.gateway)?;
++    if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
++        return Err("only a loopback Magpie gateway is supported".into());
++    }
++    if c.key.trim().is_empty() || !c.models.iter().any(|m| m.id == c.model) { return Err("missing gateway key or selected model".into()); }
++    let selected = c.model;
++    let mut models = c.models;
++    models.sort_by_key(|m| m.id != selected);
++    let mut seen = std::collections::HashSet::new();
++    let models = models.into_iter().enumerate().map(|(i,m)| {
++        if !seen.insert(m.id.clone()) { return Err("duplicate model id".into()); }
++        Ok(serde_json::from_value(json!({
++            "sort_order": i, "display_name": if m.name.is_empty() {m.id.clone()} else {format!("{} · {}", m.name, m.id)},
++            "group_name":"Magpie", "type":"openai", "base_url": c.gateway.trim_end_matches('/'),
++            "api_key":c.key, "tooltip_data":format!("Magpie / {}",m.id), "model_id":m.id,
++            "context_window_tokens":m.context.filter(|v| *v > 0),
++            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.1"}
++        }))?)
++    }).collect::<Result<Vec<ModelConfigInput>, Box<dyn std::error::Error>>>()?;
++    Ok(Catalogue { selected, models })
++}
++
++/// Cursor's SCM actions (commit message, branch name) generate through
++/// `commit_settings.model_id`, which is the row hash the provider resolves. It
++/// stays empty until something sets it, and an empty value means "forward to
++/// Cursor upstream", which fails here: the bridge has no Cursor account. Pin it
++/// to the route Magpie selected, and keep a prompt a user already wrote.
++async fn apply_commit_model(store: &Store, selected: &str) -> Result<(), Box<dyn std::error::Error>> {
++    let hash = store.models().await?
++        .into_iter()
++        .find(|model| model.model_id == selected)
++        .ok_or("selected model is missing from the bridge catalogue")?
++        .model_hash;
++    let mut settings = store.commit_settings().await?;
++    let prompt = if settings.prompt.trim().is_empty() { AUTO_COMMIT_PROMPT.trim().to_owned() } else { settings.prompt.clone() };
++    if settings.model_id == hash && settings.prompt == prompt { return Ok(()); }
++    settings.model_id = hash;
++    settings.prompt = prompt;
++    store.set_commit_settings(settings).await?;
++    Ok(())
++}
++
++#[tokio::main]
++async fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let argument = std::env::args().nth(1);
++    if argument.as_deref() == Some("--version") {
++        println!("0.2.1");
++        return Ok(());
++    }
++    if argument.as_deref() == Some("--help") || argument.is_none() {
++        println!("cursor-magpie-bridge 0.2.1\nUsage: cursor-magpie-bridge --init-ca | CONNECTION.json\nRequires CURSOR_BYOK_DATA_DIR (absolute path). --init-ca never modifies certificate trust.");
++        return Ok(());
++    }
++    // A dedicated directory is mandatory: never open the desktop BYOK database.
++    if std::env::var_os("CURSOR_BYOK_DATA_DIR").is_none() { return Err("CURSOR_BYOK_DATA_DIR is required".into()); }
++    if argument.as_deref() == Some("--init-ca") {
++        let state = cursor_server::local_app::initialize_bridge_ca()?;
++        println!("{}", json!({"ca":state, "certificate":config::managed_data_dir()?.join("ca/ca.crt")}));
++        return Ok(());
++    }
++    let path = PathBuf::from(argument.unwrap());
++    let mut contents = tokio::fs::read(&path).await?;
++    let mut current = catalogue(&contents)?;
++    let root = config::managed_data_dir()?;
++    let store = Store::connect(&format!("sqlite://{}",root.join("bridge.db").display())).await?;
++    store.replace_bridge_models(&current.models).await?;
++    apply_commit_model(&store, &current.selected).await?;
++    // 桥接没有 Cursor 账号:Cursor 自己选的 Auto(`default`)或目录里已消失的
++    // 哈希都必须落到 Magpie 选中的路由上,不能转发到官方上游。
++    let route = cursor_server::api::cursor::bidi::BridgeRoute::new(current.selected.clone());
++    let plugins = PluginRegistry::managed(store.clone(), PluginRuntime::managed()?, "1.0.1".into())?;
++    let clients = NetworkClients::bridge(store.clone());
++    let provider = Arc::new(ProviderRouter::new(store.clone(),plugins.clone(),clients.clone(),Duration::from_secs(3600),Duration::from_secs(1800)));
++    let registry = TransportRegistry::with_plugins(store.clone(),provider,PromptCompiler::new(PromptAssets::embedded()?),WebCache::managed()?,plugins,root.join("rules"));
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++    let address = listener.local_addr()?;
++    registry.web_cache().set_service_addr(address);
++    let router = api::router(registry.clone(),clients)?
++        .layer(axum::Extension(cursor_server::cursor::services::model_catalog::LocalCatalogOnly))
++        .layer(axum::Extension(route.clone()));
++    let harness = CursorHarness::new(store.clone())?;
++    harness.set_backend_addr(address);
++    let proxy = harness.start_proxy_only().await?;
++    let shutdown = CancellationToken::new();
++    let cancel = shutdown.clone();
++    let server = tokio::spawn(async move { axum::serve(listener,router).with_graceful_shutdown(async move {cancel.cancelled().await}).await });
++    println!("{}",json!({"event":"ready","proxy":proxy,"backend":format!("http://{address}"),"models":current.models.len()}));
++    // The supervisor owns stdin. Its death must not leave an orphan TLS proxy.
++    let parent_closed = CancellationToken::new();
++    let parent_signal = parent_closed.clone();
++    std::thread::spawn(move || {
++        use std::io::Read;
++        let mut buf = [0u8; 64];
++        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
++        parent_signal.cancel();
++    });
++    let mut interval = tokio::time::interval(Duration::from_secs(2));
++    #[cfg(unix)]
++    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
++    let terminate = async {
++        #[cfg(unix)]
++        sigterm.recv().await;
++        #[cfg(not(unix))]
++        std::future::pending::<()>().await;
++    };
++    tokio::pin!(terminate);
++    loop {
++        tokio::select! {
++            _ = tokio::signal::ctrl_c() => break,
++            _ = &mut terminate => break,
++            _ = parent_closed.cancelled() => break,
++            _ = interval.tick() => {
++                if server.is_finished() { break; }
++                match tokio::fs::read(&path).await {
++                    Ok(next) if next != contents => match catalogue(&next) {
++                        Ok(catalogue) => {
++                            if store.replace_bridge_models(&catalogue.models).await.is_ok() {
++                                // Cursor's own model selection follows Magpie.
++                                route.set(catalogue.selected.clone());
++                                // A route switched in Magpie must move the Git
++                                // actions with it; the models are already live,
++                                // so this failing only leaves them on the old one.
++                                if let Err(error) = apply_commit_model(&store, &catalogue.selected).await {
++                                    eprintln!("commit model not updated: {error}");
++                                }
++                                contents = next;
++                                current = catalogue;
++                                println!("{}",json!({"event":"catalogue","models":current.models.len()}));
++                            } else { eprintln!("catalogue update failed; retaining last complete catalogue"); }
++                        }
++                        Err(_) => eprintln!("invalid catalogue; retaining last complete catalogue"),
++                    },
++                    _ => {},
++                }
++            }
++        }
++    }
++    harness.stop_proxy_only().await;
++    registry.shutdown().await;
++    shutdown.cancel();
++    let _ = tokio::time::timeout(Duration::from_secs(10),server).await;
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use cursor_server::store::CommitSettings;
++    fn config() -> serde_json::Value { json!({"gateway":"http://127.0.0.1:3425/v1","key":"test-only","model":"p/b","models":[{"id":"p/a","name":"A","context":200000},{"id":"p/b","name":"B"}]}) }
++    #[test]
++    fn selected_model_first_and_route_preserved() {
++        let catalogue=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap();
++        assert_eq!(catalogue.selected,"p/b");
++        let models=catalogue.models;
++        assert_eq!(models[0].model_id,"p/b");
++        assert_eq!(models[1].context_window_tokens,Some(200000));
++        assert_eq!(models[0].base_url,"http://127.0.0.1:3425/v1");
++        assert_eq!(models[0].api_key,"test-only");
++    }
++    #[test]
++    fn rejects_remote_and_duplicate_models() {
++        let mut c=config();c["gateway"]=json!("http://evil.example/v1");assert!(catalogue(&serde_json::to_vec(&c).unwrap()).is_err());
++        let mut c=config();c["models"]=json!([{"id":"p/b"},{"id":"p/b"}]);assert!(catalogue(&serde_json::to_vec(&c).unwrap()).is_err());
++    }
++    #[tokio::test]
++    async fn catalogue_update_is_atomic_and_retains_last_valid_models() {
++        let dir=tempfile::tempdir().unwrap();
++        let store=Store::connect(&format!("sqlite://{}",dir.path().join("test.db").display())).await.unwrap();
++        let inputs=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap().models;
++        store.replace_bridge_models(&inputs).await.unwrap();
++        let duplicate=vec![inputs[0].clone(),inputs[0].clone()];
++        assert!(store.replace_bridge_models(&duplicate).await.is_err());
++        assert_eq!(store.models().await.unwrap().len(),2);
++        let mut invalid=inputs.clone();invalid[1].api_key="".into();
++        assert!(store.replace_bridge_models(&invalid).await.is_err());
++        assert_eq!(store.models().await.unwrap().len(),2);
++        store.replace_bridge_models(&inputs[..1]).await.unwrap();
++        assert_eq!(store.models().await.unwrap().len(),1);
++    }
++    // Cursor's Git actions only reach Magpie when the commit row names a stored
++    // model, and the row it needs is the hash, not the route id.
++    #[tokio::test]
++    async fn git_actions_generate_through_the_selected_route() {
++        let dir=tempfile::tempdir().unwrap();
++        let store=Store::connect(&format!("sqlite://{}",dir.path().join("commit.db").display())).await.unwrap();
++        let first=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap();
++        store.replace_bridge_models(&first.models).await.unwrap();
++        apply_commit_model(&store,&first.selected).await.unwrap();
++        let selected=store.models().await.unwrap().into_iter().find(|m| m.model_id=="p/b").unwrap();
++        let settings=store.commit_settings().await.unwrap();
++        assert_eq!(settings.model_id,selected.model_hash);
++        assert_eq!(settings.prompt.trim(),AUTO_COMMIT_PROMPT.trim());
++        // A prompt the user wrote stays, even after the route changes.
++        store.set_commit_settings(CommitSettings{model_id:String::new(),prompt:"自定义提交提示词".into(),..CommitSettings::default()}).await.unwrap();
++        let switched=catalogue(&serde_json::to_vec(&{let mut c=config();c["model"]=json!("p/a");c}).unwrap()).unwrap();
++        store.replace_bridge_models(&switched.models).await.unwrap();
++        apply_commit_model(&store,&switched.selected).await.unwrap();
++        let moved=store.models().await.unwrap().into_iter().find(|m| m.model_id=="p/a").unwrap();
++        let settings=store.commit_settings().await.unwrap();
++        assert_eq!(settings.model_id,moved.model_hash);
++        assert_eq!(settings.prompt,"自定义提交提示词");
++    }
++}
 diff --git a/server/src/config.rs b/server/src/config.rs
 index d2a9810..18bacc6 100644
 --- a/server/src/config.rs
@@ -24,6 +754,535 @@ index d2a9810..18bacc6 100644
      fs::create_dir_all(&data_dir)?;
      #[cfg(unix)]
      fs::set_permissions(&data_dir, fs::Permissions::from_mode(0o700))?;
+diff --git a/server/src/cursor/compile/context.rs b/server/src/cursor/compile/context.rs
+index 859ecc5..7d45606 100644
+--- a/server/src/cursor/compile/context.rs
++++ b/server/src/cursor/compile/context.rs
+@@ -557,6 +557,8 @@ fn prost_value(value: &prost_types::Value) -> Value {
+     use prost_types::value::Kind;
+     match value.kind.as_ref() {
+         None | Some(Kind::NullValue(_)) => Value::Null,
++        // Protobuf Value stores all numbers as doubles; restore exact JSON integers.
++        Some(Kind::NumberValue(value)) if value.fract() == 0.0 && value.abs() <= 9_007_199_254_740_991.0 => Value::from(*value as i64),
+         Some(Kind::NumberValue(value)) => serde_json::Number::from_f64(*value)
+             .map(Value::Number)
+             .unwrap_or(Value::Null),
+@@ -627,3 +629,33 @@ mod tests {
+         assert!(context.non_file_rules.is_empty());
+     }
+ }
++
++#[cfg(test)]
++mod bridge_json_numbers {
++    #[test]
++    fn nested_tool_schemas_preserve_integer_limits_and_fractional_constraints() {
++        use prost_types::{Value, Struct, ListValue, value::Kind};
++        fn number(n: f64) -> Value { Value { kind: Some(Kind::NumberValue(n)) } }
++        fn object(fields: Vec<(&str, Value)>) -> Value {
++            Value { kind: Some(Kind::StructValue(Struct { fields: fields.into_iter().map(|(k,v)| (k.to_owned(),v)).collect() })) }
++        }
++        let limits = object(vec![("minLength",number(1.0)),("maxItems",number(5.0)),("minimum",number(-0.5)),("multipleOf",number(0.01))]);
++        let schema = object(vec![("anyOf",Value { kind: Some(Kind::ListValue(ListValue { values: vec![object(vec![("properties",object(vec![("value",limits)]))])] })) })]);
++        let json = super::prost_value(&schema);
++        let field = &json["anyOf"][0]["properties"]["value"];
++        assert_eq!(field["minLength"].as_i64(),Some(1));
++        assert_eq!(field["maxItems"].as_i64(),Some(5));
++        assert_eq!(field["minimum"].as_f64(),Some(-0.5));
++        assert_eq!(field["multipleOf"].as_f64(),Some(0.01));
++        assert!(super::prost_value(&number(9_007_199_254_740_992.0)).as_i64().is_none());
++        assert!(super::prost_value(&number(f64::NAN)).is_null());
++    }
++
++    #[test]
++    fn protobuf_schema_numbers_restore_json_integers() {
++        use prost_types::{Value, value::Kind};
++        for (input, expected) in [(1.0, "1"), (0.0, "0"), (-2.0, "-2"), (1.5, "1.5")] {
++            assert_eq!(super::prost_value(&Value { kind: Some(Kind::NumberValue(input)) }).to_string(), expected);
++        }
++    }
++}
+diff --git a/server/src/cursor/compile/run.rs b/server/src/cursor/compile/run.rs
+index b3712ce..b8466f9 100644
+--- a/server/src/cursor/compile/run.rs
++++ b/server/src/cursor/compile/run.rs
+@@ -1,6 +1,7 @@
+ //! Compiles an AgentRunRequest into a PreparedRun.
+ use std::collections::BTreeMap;
+ 
++use prost::Message as _;
+ use uuid::Uuid;
+ 
+ use crate::{
+@@ -399,6 +400,28 @@ fn execution_run_id(request_id: &str) -> RunId {
+     RunId::new(format!("{request_id}:{}", &execution_id[..8]))
+ }
+ 
++fn synthetic_message_id(user: &pb::UserMessage) -> String {
++    let mut identity = user.clone();
++    identity.message_id.clear();
++    format!("synthetic:{}", BlobId::digest(&identity.encode_to_vec()).to_base64())
++}
++
++#[cfg(test)]
++mod synthetic_id_tests {
++    use super::*;
++
++    #[test]
++    fn message_identity_is_stable_and_distinguishes_content() {
++        let first = pb::UserMessage { text: "task one".into(), ..Default::default() };
++        let other = pb::UserMessage { text: "task two".into(), ..Default::default() };
++        let mut with_id = first.clone();
++        with_id.message_id = "ignored".into();
++        assert_eq!(synthetic_message_id(&first), synthetic_message_id(&first.clone()));
++        assert_eq!(synthetic_message_id(&first), synthetic_message_id(&with_id));
++        assert_ne!(synthetic_message_id(&first), synthetic_message_id(&other));
++    }
++}
++
+ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+     let conversation_mode = request
+         .conversation_state
+@@ -431,15 +454,14 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+             } else {
+                 user.mode
+             };
+-            if user.message_id.is_empty() {
+-                return Err(Error::Protocol(
+-                    "Cursor user message action has no message_id".into(),
+-                ));
++            let mut turn_user = user.clone();
++            if turn_user.message_id.is_empty() {
++                turn_user.message_id = synthetic_message_id(&turn_user);
+             }
+-            if user.text.trim() == "/summarize" {
++            if turn_user.text.trim() == "/summarize" {
+                 return Ok(ActionProjection {
+                     mode,
+-                    turn_user: Some(user.clone()),
++                    turn_user: Some(turn_user),
+                     action_context: String::new(),
+                     event_id: None,
+                     input_id: None,
+@@ -461,10 +483,10 @@ fn action(request: &pb::AgentRunRequest) -> Result<ActionProjection> {
+                     .filter(|text| !text.is_empty())
+                     .cloned(),
+             );
+-            let input_id = format!("cursor:user:{}", user.message_id);
++            let input_id = format!("cursor:user:{}", turn_user.message_id);
+             Ok(ActionProjection {
+                 mode,
+-                turn_user: Some(user.clone()),
++                turn_user: Some(turn_user),
+                 action_context: context.join("\n\n"),
+                 event_id: None,
+                 input_id: Some(input_id),
+diff --git a/server/src/cursor/conversation/runtime.rs b/server/src/cursor/conversation/runtime.rs
+index dae5cf5..b7fe93b 100644
+--- a/server/src/cursor/conversation/runtime.rs
++++ b/server/src/cursor/conversation/runtime.rs
+@@ -628,7 +628,7 @@ fn spawn_run_request(
+         let mut checkpoint = CheckpointBuilder::new(
+             dependencies.store.clone(),
+             blob_sync.clone(),
+-            handle.parent().map(|parent| parent.tool_call_id.clone()),
++            handle.parent().and_then(|parent| parent.tool_call_id.clone()),
+             request.conversation_state.clone(),
+         );
+         let prepared = tokio::select! {
+diff --git a/server/src/cursor/protocol/proto.rs b/server/src/cursor/protocol/proto.rs
+index 0d40c98..1693ff7 100644
+--- a/server/src/cursor/protocol/proto.rs
++++ b/server/src/cursor/protocol/proto.rs
+@@ -53,6 +53,22 @@ pub mod aiserver {
+             pub commit_message: String,
+         }
+ 
++        /// Branch name generation request. Cursor sends one diff plus the
++        /// caller's optional instruction; credentials stay unknown fields.
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct WriteGitBranchNameRequest {
++            #[prost(string, tag = "1")]
++            pub diffs: String,
++            #[prost(string, optional, tag = "2")]
++            pub context: Option<String>,
++        }
++
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct WriteGitBranchNameResponse {
++            #[prost(string, tag = "1")]
++            pub branch_name: String,
++        }
++
+         #[derive(Clone, Copy, PartialEq, ::prost::Message)]
+         pub struct BidiAppendResponse {}
+ 
+diff --git a/server/src/cursor/services/analytics.rs b/server/src/cursor/services/analytics.rs
+index 80103d1..9fa0a66 100644
+--- a/server/src/cursor/services/analytics.rs
++++ b/server/src/cursor/services/analytics.rs
+@@ -26,37 +26,39 @@ struct BootstrapStatsigResponse {
+ 
+ pub async fn bootstrap_statsig(
+     Extension(upstream): Extension<proxy::CursorProxy>,
++    local_only: Option<Extension<super::model_catalog::LocalCatalogOnly>>,
+     request: Request<Body>,
+ ) -> Result<Response<Body>> {
++    let bridge = local_only.is_some();
+     match proxy::forward_buffered(&upstream, request).await {
+-        Ok(response) if response.status.is_success() => match patch_upstream(response) {
++        Ok(response) if response.status.is_success() => match patch_upstream(response, bridge) {
+             Ok(response) => Ok(response),
+             Err(error) => {
+                 tracing::warn!(%error, "Cursor Statsig bootstrap was invalid; using local bootstrap");
+-                local_response()
++                local_response(bridge)
+             }
+         },
+         Ok(response) => {
+             tracing::warn!(status = %response.status, "Cursor Statsig bootstrap was rejected; using local bootstrap");
+-            local_response()
++            local_response(bridge)
+         }
+         Err(error) => {
+             tracing::warn!(%error, "Cursor Statsig bootstrap was unavailable; using local bootstrap");
+-            local_response()
++            local_response(bridge)
+         }
+     }
+ }
+ 
+-fn patch_upstream(response: proxy::BufferedResponse) -> Result<Response<Body>> {
++fn patch_upstream(response: proxy::BufferedResponse, bridge: bool) -> Result<Response<Body>> {
+     let (framed, payload) = unary_payload(&response.body)?;
+     let mut message = BootstrapStatsigResponse::decode(payload)?;
+     let mut config = serde_json::from_str::<Value>(&message.config)?;
+-    enable_agent_retries(&mut config)?;
++    configure_agent_protocol(&mut config, bridge)?;
+     message.config = serde_json::to_string(&config)?;
+     Ok(response.with_body(encode_unary(&message, framed)))
+ }
+ 
+-fn local_response() -> Result<Response<Body>> {
++fn local_response(bridge: bool) -> Result<Response<Body>> {
+     let generated_at_ms = chrono::Utc::now().timestamp_millis() as u64;
+     let mut config = json!({
+         "feature_gates": {},
+@@ -74,7 +76,7 @@ fn local_response() -> Result<Response<Body>> {
+         },
+         "time": generated_at_ms
+     });
+-    enable_agent_retries(&mut config)?;
++    configure_agent_protocol(&mut config, bridge)?;
+     let message = BootstrapStatsigResponse {
+         config: serde_json::to_string(&config)?,
+         generated_at_ms,
+@@ -96,6 +98,20 @@ fn local_response() -> Result<Response<Body>> {
+     Ok(response)
+ }
+ 
++fn configure_agent_protocol(config: &mut Value, bridge: bool) -> Result<()> {
++    enable_agent_retries(config)?;
++    if bridge {
++        // 专用桥接只实现 Agent Run，不能继承上游的 RunInference 灰度开关。
++        let key = statsig_key(config, "agent_host_local_loop");
++        let mut gate = enabled_gate(&key);
++        gate["value"] = json!(false);
++        gate["rule_id"] = json!("bridge_agent_run");
++        gate["ruleID"] = json!("bridge_agent_run");
++        config["feature_gates"][key] = gate;
++    }
++    Ok(())
++}
++
+ fn enable_agent_retries(config: &mut Value) -> Result<()> {
+     let gate_key = statsig_key(config, AGENT_RETRIES_GATE);
+     let root = config
+@@ -146,6 +162,69 @@ fn enabled_gate(name: &str) -> Value {
+     })
+ }
+ 
++#[cfg(test)]
++mod bridge_protocol_tests {
++    use super::*;
++
++    #[test]
++    fn bridge_selects_agent_run_for_every_supported_hash() {
++        for hash in ["none", "djb2", "sha256"] {
++            let mut config = json!({"hash_used": hash, "feature_gates": {}});
++            let key = statsig_key(&config, "agent_host_local_loop");
++            config["feature_gates"][&key] = enabled_gate(&key);
++            configure_agent_protocol(&mut config, true).unwrap();
++            assert_eq!(config["feature_gates"][&key]["value"], false);
++            let retries = statsig_key(&config, AGENT_RETRIES_GATE);
++            assert_eq!(config["feature_gates"][retries]["value"], true);
++        }
++    }
++
++    #[test]
++    fn ordinary_byok_retains_upstream_runtime_selection() {
++        let mut config = json!({"feature_gates": {
++            "agent_host_local_loop": {"value": true}, "unrelated": {"value": true}
++        }});
++        configure_agent_protocol(&mut config, false).unwrap();
++        assert_eq!(config["feature_gates"]["agent_host_local_loop"]["value"], true);
++        assert_eq!(config["feature_gates"]["unrelated"]["value"], true);
++    }
++
++    #[tokio::test]
++    async fn upstream_bootstrap_preserves_framing_and_other_gates() {
++        for framed in [false, true] {
++            let message = BootstrapStatsigResponse {
++                config: json!({"feature_gates": {
++                    "agent_host_local_loop": {"value": true},
++                    "unrelated": {"value": true}
++                }}).to_string(),
++                generated_at_ms: 42,
++            };
++            let response = patch_upstream(proxy::BufferedResponse {
++                status: StatusCode::OK,
++                headers: Default::default(),
++                body: encode_unary(&message, framed),
++            }, true).unwrap();
++            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
++            let (actual_framed, payload) = unary_payload(&body).unwrap();
++            assert_eq!(actual_framed, framed);
++            let message = BootstrapStatsigResponse::decode(payload).unwrap();
++            assert_eq!(message.generated_at_ms, 42);
++            let config: Value = serde_json::from_str(&message.config).unwrap();
++            assert_eq!(config["feature_gates"]["agent_host_local_loop"]["value"], false);
++            assert_eq!(config["feature_gates"]["unrelated"]["value"], true);
++        }
++    }
++
++    #[tokio::test]
++    async fn bridge_fallback_explicitly_disables_cached_local_loop() {
++        let response = local_response(true).unwrap();
++        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
++        let message = BootstrapStatsigResponse::decode(body).unwrap();
++        let config: Value = serde_json::from_str(&message.config).unwrap();
++        assert_eq!(config["feature_gates"]["agent_host_local_loop"]["value"], false);
++    }
++}
++
+ fn unary_payload(body: &Bytes) -> Result<(bool, &[u8])> {
+     if body.len() < 5 {
+         return Ok((false, body));
+diff --git a/server/src/cursor/services/commit_message.rs b/server/src/cursor/services/commit_message.rs
+index 6198848..bcceddb 100644
+--- a/server/src/cursor/services/commit_message.rs
++++ b/server/src/cursor/services/commit_message.rs
+@@ -1,4 +1,4 @@
+-//! Generates Git commit messages locally for Cursor's SCM action.
++//! Generates Git names locally for Cursor's SCM actions.
+ //!
+ //! Cursor sends `aiserver.v1.AiService/WriteGitCommitMessage` with the staged
+ //! diffs. Empty commit-settings `model_id` keeps the original behaviour and
+@@ -6,6 +6,10 @@
+ //! answers the request locally: truncated diffs + previous commits form the user
+ //! message, the customizable commit prompt is the system prompt, and the raw
+ //! completion is cleaned before being returned.
++//!
++//! `WriteGitBranchName` (the SCM view's branch-name action) shares that model
++//! and that streaming path; only the prompt and the cleanup differ, because a
++//! branch name has to be a valid git ref.
+ use std::{
+     sync::Arc,
+     time::{Duration, Instant},
+@@ -42,6 +46,14 @@ const PREVIOUS_COMMIT_LIMIT: usize = 12;
+ const EXPLICIT_CONTEXT_LIMIT: usize = 20_000;
+ const GENERATION_TIMEOUT: Duration = Duration::from_secs(180);
+ const COMMIT_MAX_OUTPUT_TOKENS: u64 = 30_000;
++const BRANCH_MAX_LENGTH: usize = 60;
++const BRANCH_PROMPT: &str = "You are a Git branch-name generator. Given a Git diff, output one branch name and nothing else: \
++no explanation, no quotes, no code fence, no trailing punctuation. Your whole reply is used as the branch name.\n\n\
++Rules:\n\
++- Format: <type>/<kebab-case summary>, where type is one of feat, fix, docs, style, refactor, perf, test, build, ci, chore.\n\
++- The summary is a code identifier, not prose: ASCII letters and digits only, words separated by single hyphens, at most 5 words.\n\
++- Describe what the diff changes, not the file names.\n\
++- Never use spaces, underscores, uppercase letters, emoji, '..', '//', or a trailing dot.";
+ 
+ pub async fn write_git_commit_message(
+     State(registry): State<TransportRegistry>,
+@@ -67,6 +79,110 @@ async fn forward_direct(
+     }
+ }
+ 
++/// `aiserver.v1.AiService/WriteGitBranchName`: the SCM view's "generate branch
++/// name" action. It is answered by the same configured model as the commit
++/// message, so no separate setting can make one work and the other not.
++pub async fn write_git_branch_name(
++    State(registry): State<TransportRegistry>,
++    Extension(upstream): Extension<CursorProxy>,
++    request: Request<Body>,
++) -> Result<Response<Body>> {
++    let settings = registry.store().commit_settings().await?;
++    if settings.is_direct() {
++        return forward_direct(&registry, upstream, request).await;
++    }
++    generate_branch_name(&registry, request, settings).await
++}
++
++async fn generate_branch_name(
++    registry: &TransportRegistry,
++    request: Request<Body>,
++    settings: CommitSettings,
++) -> Result<Response<Body>> {
++    let (parts, body) = request.into_parts();
++    let connect_timeout_ms = parts
++        .headers
++        .get("connect-timeout-ms")
++        .and_then(|value| value.to_str().ok())
++        .and_then(|value| value.parse::<u64>().ok());
++    tracing::info!(?connect_timeout_ms, "write git branch name received");
++    let body = to_bytes(body, usize::MAX)
++        .await
++        .map_err(|error| Error::Protocol(format!("cannot read request body: {error}")))?;
++    let request: ai::WriteGitBranchNameRequest = connect::decode_unary(&body)?;
++    let diff = truncate_text(&request.diffs, DIFF_SINGLE_LIMIT);
++    if diff.is_empty() {
++        return Err(Error::Protocol("diffs are required".into()));
++    }
++    let model_id = settings.model_id.trim();
++    ensure_configured_model(registry, model_id).await?;
++    let provider = registry.conversations().dependencies().provider.clone();
++    let generated = generate(
++        provider,
++        branch_invocation(model_id, &request, &diff),
++        connect_timeout_ms.map(Duration::from_millis),
++    )
++    .await?;
++    let branch_name = clean_branch_name(&generated)
++        .ok_or_else(|| Error::Provider("generated branch name is empty".into()))?;
++    let payload = ai::WriteGitBranchNameResponse { branch_name }.encode_to_vec();
++    let mut response = Response::new(Body::from(payload));
++    *response.status_mut() = StatusCode::OK;
++    response.headers_mut().insert(
++        header::CONTENT_TYPE,
++        HeaderValue::from_static("application/proto"),
++    );
++    Ok(response)
++}
++
++fn branch_invocation(
++    model_id: &str,
++    request: &ai::WriteGitBranchNameRequest,
++    diff: &str,
++) -> ModelInvocation {
++    let call_id = format!("branch-name-{}", uuid::Uuid::new_v4());
++    ModelInvocation {
++        call_id: call_id.clone(),
++        run_id: call_id.clone(),
++        conversation_id: call_id,
++        provider_call_index: 0,
++        request: ModelRequest {
++            prompt: PromptSpec {
++                instructions: BRANCH_PROMPT.to_owned(),
++                tools: Vec::new(),
++            },
++            model: ModelSpec {
++                max_output_tokens: Some(COMMIT_MAX_OUTPUT_TOKENS),
++                ..ModelSpec::new(model_id.to_owned())
++            },
++            history: vec![ProjectedMessage {
++                message_id: "branch-name".into(),
++                role: Role::User,
++                content: ProjectedContent::Parts(vec![ContentPart::Text {
++                    text: branch_user_content(request, diff),
++                }]),
++            }],
++        },
++    }
++}
++
++fn branch_user_content(request: &ai::WriteGitBranchNameRequest, diff: &str) -> String {
++    let mut sections = vec!["Generate a Git branch name for the following changes.".to_owned()];
++    if let Some(context) = request
++        .context
++        .as_deref()
++        .map(str::trim)
++        .filter(|value| !value.is_empty())
++    {
++        sections.push(format!(
++            "Requested by the user:\n{}",
++            truncate_text(context, EXPLICIT_CONTEXT_LIMIT)
++        ));
++    }
++    sections.push(format!("Diff:\n{diff}"));
++    sections.join("\n\n")
++}
++
+ async fn generate_local(
+     registry: &TransportRegistry,
+     request: Request<Body>,
+@@ -341,6 +457,45 @@ fn clean_generated_commit_message(value: &str) -> String {
+     }
+ }
+ 
++fn clean_branch_name(value: &str) -> Option<String> {
++    let fenced = strip_code_fence(value);
++    let line = fenced.lines().map(str::trim).find(|line| !line.is_empty())?;
++    let mut name = String::new();
++    for character in line.chars() {
++        if character.is_alphanumeric() {
++            name.extend(character.to_lowercase());
++        } else if character == '-' || character == '/' || character == '.' {
++            name.push(character);
++        } else if character.is_whitespace() || character == '_' {
++            name.push('-');
++        }
++    }
++    let name = trim_branch_name(&name);
++    (!name.is_empty()).then_some(name)
++}
++
++/// Git refuses `..`, `//`, and leading or trailing separators, and the model's
++/// line can produce any of them (a scope in parentheses, a sentence's full
++/// stop, "feat: Add"). Collapse and trim them instead of refusing the name.
++fn trim_branch_name(name: &str) -> String {
++    let mut collapsed = String::new();
++    for character in name.chars() {
++        let separator = character == '-' || character == '/' || character == '.';
++        if separator && collapsed.chars().next_back() == Some(character) {
++            continue;
++        }
++        collapsed.push(character);
++    }
++    let trim = |value: &str| {
++        value
++            .trim_matches(|character| character == '-' || character == '/' || character == '.')
++            .to_owned()
++    };
++    let trimmed = trim(&collapsed);
++    let capped: String = trimmed.chars().take(BRANCH_MAX_LENGTH).collect();
++    trim(&capped)
++}
++
+ fn strip_code_fence(value: &str) -> String {
+     let trimmed = value.trim();
+     if !trimmed.starts_with("```") {
+@@ -412,4 +567,22 @@ mod tests {
+         });
+         assert_eq!(filled, "{\"context\":\"背景\",\"repo_context\":\"repo\"}");
+     }
++
++    #[test]
++    fn branch_names_become_valid_git_refs() {
++        assert_eq!(clean_branch_name("feat/add-login"), Some("feat/add-login".into()));
++        assert_eq!(clean_branch_name("```\nfeat/Add Login Form\n```"), Some("feat/add-login-form".into()));
++        assert_eq!(clean_branch_name("Fix: null pointer on save."), Some("fix-null-pointer-on-save".into()));
++        assert_eq!(clean_branch_name("chore(deps)/bump_v2..3"), Some("choredeps/bump-v2.3".into()));
++        // A name that is only separators or prose-free punctuation has no ref left.
++        assert_eq!(clean_branch_name("  ...  "), None);
++        assert_eq!(clean_branch_name("```\n```"), None);
++    }
++
++    #[test]
++    fn branch_names_are_capped_without_a_trailing_separator() {
++        let name = clean_branch_name(&format!("feat/{}", "word-".repeat(40))).unwrap();
++        assert!(name.chars().count() <= BRANCH_MAX_LENGTH, "{name}");
++        assert!(!name.ends_with('-') && !name.ends_with('/') && !name.ends_with('.'));
++    }
+ }
 diff --git a/server/src/cursor/services/model_catalog.rs b/server/src/cursor/services/model_catalog.rs
 index b9dbd08..209b430 100644
 --- a/server/src/cursor/services/model_catalog.rs
@@ -236,6 +1495,177 @@ index b9dbd08..209b430 100644
 +    }
 +
  }
+diff --git a/server/src/cursor/services/tab.rs b/server/src/cursor/services/tab.rs
+index 6e06ee9..ef6f968 100644
+--- a/server/src/cursor/services/tab.rs
++++ b/server/src/cursor/services/tab.rs
+@@ -9,7 +9,7 @@ use axum::{
+ 
+ use crate::{api::cursor::proxy, cursor::transport::TransportRegistry, Result};
+ 
+-pub const TAB_PATHS: [&str; 16] = [
++pub const TAB_PATHS: [&str; 15] = [
+     "/aiserver.v1.AiService/StreamCpp",
+     "/aiserver.v1.AiService/StreamNextCursorPrediction",
+     "/aiserver.v1.AiService/GetCppEditClassification",
+@@ -19,7 +19,6 @@ pub const TAB_PATHS: [&str; 16] = [
+     "/aiserver.v1.AiService/CppAppend",
+     "/aiserver.v1.AiService/CppEditHistoryAppend",
+     "/aiserver.v1.AiService/ReportAiCodeChangeMetrics",
+-    "/aiserver.v1.AiService/WriteGitBranchName",
+     "/aiserver.v1.CppService/AvailableModels",
+     "/aiserver.v1.CppService/RecordCppFate",
+     "/aiserver.v1.FileSyncService/FSSyncFile",
+diff --git a/server/src/cursor/tools/codec/response.rs b/server/src/cursor/tools/codec/response.rs
+index ea3b679..40614d8 100644
+--- a/server/src/cursor/tools/codec/response.rs
++++ b/server/src/cursor/tools/codec/response.rs
+@@ -291,6 +291,7 @@ fn shell_exit_result(
+     let result = if exit.code == 0 && !exit.aborted {
+         pb::shell_result::Result::Success(pb::ShellSuccess {
+             working_directory: exit.cwd.clone(),
++            output_location: exit.output_location.clone(),
+             exit_code: exit.code as i32,
+             stdout: stdout.into(),
+             stderr: stderr.into(),
+@@ -303,6 +304,7 @@ fn shell_exit_result(
+     } else {
+         pb::shell_result::Result::Failure(pb::ShellFailure {
+             working_directory: exit.cwd.clone(),
++            output_location: exit.output_location.clone(),
+             exit_code: exit.code as i32,
+             stdout: stdout.into(),
+             stderr: stderr.into(),
+diff --git a/server/src/cursor/tools/tool_call_result/exec/output.rs b/server/src/cursor/tools/tool_call_result/exec/output.rs
+index 2441a5a..fa952be 100644
+--- a/server/src/cursor/tools/tool_call_result/exec/output.rs
++++ b/server/src/cursor/tools/tool_call_result/exec/output.rs
+@@ -33,7 +33,15 @@ fn shell(value: &pb::ShellResult) -> Result<(String, bool)> {
+             if let Some(folder) = value.terminals_folder.as_deref().filter(|v| !v.is_empty()) {
+                 fields.push(format!("terminals_folder={folder}"));
+             }
+-            let output = streams(&success.stdout, &success.stderr);
++            let output = shell_output(
++                &success.stdout,
++                &success.stderr,
++                success.interleaved_output.as_deref(),
++                success.output_head.as_deref(),
++                success.output_tail.as_deref(),
++                success.elided_chars,
++                success.output_location.as_ref(),
++            );
+             let prefix = format!("shell running in background {}", fields.join(" "));
+             return Ok((
+                 if output == "shell completed without output" {
+@@ -44,8 +52,29 @@ fn shell(value: &pb::ShellResult) -> Result<(String, bool)> {
+                 false,
+             ));
+         }
+-        R::Success(success) => return Ok((streams(&success.stdout, &success.stderr), false)),
+-        R::Failure(failure) => streams(&failure.stdout, &failure.stderr),
++        R::Success(success) => {
++            return Ok((
++                shell_output(
++                    &success.stdout,
++                    &success.stderr,
++                    success.interleaved_output.as_deref(),
++                    success.output_head.as_deref(),
++                    success.output_tail.as_deref(),
++                    success.elided_chars,
++                    success.output_location.as_ref(),
++                ),
++                false,
++            ))
++        }
++        R::Failure(failure) => shell_output(
++            &failure.stdout,
++            &failure.stderr,
++            failure.interleaved_output.as_deref(),
++            failure.output_head.as_deref(),
++            failure.output_tail.as_deref(),
++            failure.elided_chars,
++            failure.output_location.as_ref(),
++        ),
+         R::Timeout(timeout) => format!(
+             "shell timed out after {}ms in {}",
+             timeout.timeout_ms, timeout.working_directory
+@@ -57,6 +86,47 @@ fn shell(value: &pb::ShellResult) -> Result<(String, bool)> {
+     Ok((output, true))
+ }
+ 
++// The output file belongs to Cursor's execution environment (possibly SSH).
++// Preserve its reference; never read that path from the bridge host.
++fn shell_output(
++    stdout: &str,
++    stderr: &str,
++    interleaved: Option<&str>,
++    head: Option<&str>,
++    tail: Option<&str>,
++    elided: Option<u32>,
++    location: Option<&pb::OutputLocation>,
++) -> String {
++    let inline = if let Some(text) = interleaved.filter(|text| !text.is_empty()) {
++        Some(text.to_owned())
++    } else if !stdout.is_empty() || !stderr.is_empty() {
++        Some(streams(stdout, stderr))
++    } else if head.is_some_and(|s| !s.is_empty()) || tail.is_some_and(|s| !s.is_empty()) {
++        let mut parts = Vec::new();
++        if let Some(text) = head.filter(|s| !s.is_empty()) {
++            parts.push(text.to_owned());
++        }
++        if let Some(count) = elided.filter(|count| *count > 0) {
++            parts.push(format!("[Output excerpt: {count} characters omitted]"));
++        }
++        if let Some(text) = tail.filter(|s| !s.is_empty()) {
++            parts.push(text.to_owned());
++        }
++        Some(parts.join("\n"))
++    } else {
++        None
++    };
++    let reference = location.filter(|loc| !loc.file_path.is_empty()).map(|loc| format!(
++        "Shell output file: {} ({} bytes, {} lines). Use Cursor's Read tool in the same execution environment to inspect the file.",
++        loc.file_path, loc.size_bytes, loc.line_count));
++    match (reference, inline) {
++        (Some(reference), Some(text)) => format!("{reference}\n\n{text}"),
++        (Some(reference), None) => reference,
++        (None, Some(text)) => text,
++        (None, None) => "shell completed without output".into(),
++    }
++}
++
+ fn streams(stdout: &str, stderr: &str) -> String {
+     match (stdout.is_empty(), stderr.is_empty()) {
+         (false, false) => format!("{stdout}\n\n<stderr>\n{stderr}\n</stderr>"),
+diff --git a/server/src/cursor/transport/handle.rs b/server/src/cursor/transport/handle.rs
+index 87a0a2e..038915f 100644
+--- a/server/src/cursor/transport/handle.rs
++++ b/server/src/cursor/transport/handle.rs
+@@ -19,8 +19,8 @@ use super::{OutputHub, TransportAdmission, TransportLifecycle};
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+ pub struct TransportParent {
+-    pub request_id: String,
+-    pub tool_call_id: String,
++    pub request_id: Option<String>,
++    pub tool_call_id: Option<String>,
+ }
+ 
+ #[derive(Clone)]
+@@ -81,8 +81,11 @@ impl TransportHandle {
+     }
+ 
+     pub fn set_parent(&self, parent: TransportParent) -> Result<()> {
+-        if parent.request_id.is_empty() || parent.tool_call_id.is_empty() {
+-            return Err(Error::Protocol("Cursor parent ids are required".into()));
++        if (parent.request_id.is_none() && parent.tool_call_id.is_none())
++            || parent.request_id.as_ref().is_some_and(String::is_empty)
++            || parent.tool_call_id.as_ref().is_some_and(String::is_empty)
++        {
++            return Err(Error::Protocol("Cursor parent ids must not be empty".into()));
+         }
+         if self.parent.get().is_some_and(|current| current != &parent) {
+             return Err(Error::Protocol(format!(
 diff --git a/server/src/local_app/mod.rs b/server/src/local_app/mod.rs
 index 7c50336..0bf45f1 100644
 --- a/server/src/local_app/mod.rs
@@ -279,8 +1709,149 @@ index 7c50336..0bf45f1 100644
      pub async fn proxy_port(&self) -> Option<u16> {
          self.inner.proxy.lock().await.port()
      }
+diff --git a/server/src/local_app/proxy.rs b/server/src/local_app/proxy.rs
+index fda8ce0..11eb900 100644
+--- a/server/src/local_app/proxy.rs
++++ b/server/src/local_app/proxy.rs
+@@ -184,6 +184,7 @@ fn is_local_path(path: &str) -> bool {
+             | "/aiserver.v1.AiService/KnowledgeBaseUpdate"
+             | "/aiserver.v1.AiService/KnowledgeBaseRemove"
+             | "/aiserver.v1.AiService/WriteGitCommitMessage"
++            | "/aiserver.v1.AiService/WriteGitBranchName"
+             | "/aiserver.v1.NetworkService/IsConnected"
+             | "/aiserver.v1.AnalyticsService/BootstrapStatsig"
+             | "/auth/full_stripe_profile"
+@@ -209,6 +210,8 @@ mod tests {
+             "/aiserver.v1.AiService/GetDefaultModel",
+             "/aiserver.v1.AiService/GetDefaultModelNudgeData",
+             "/aiserver.v1.AiService/AvailableDocs",
++            "/aiserver.v1.AiService/WriteGitCommitMessage",
++            "/aiserver.v1.AiService/WriteGitBranchName",
+             "/aiserver.v1.DashboardService/GetEffectiveUserPlugins",
+             "/aiserver.v1.DashboardService/GetUserPrivacyMode",
+             "/aiserver.v1.AuthService/GetUserMeta",
+diff --git a/server/src/model/configuration.rs b/server/src/model/configuration.rs
+index 1fe7111..e1db16a 100644
+--- a/server/src/model/configuration.rs
++++ b/server/src/model/configuration.rs
+@@ -290,12 +290,9 @@ pub fn model_hash(input: &ModelConfigInput) -> Result<String> {
+         &normalized.openai_endpoint,
+         normalized.use_full_url,
+     )?;
+-    let mut parts = vec![
+-        request_url,
+-        normalized.model_id,
+-        normalized.api_key,
+-        normalized.display_name,
+-    ];
++    // 身份哈希标识的是路由(地址、密钥、上游模型),不是它的显示名:
++    // 改名(例如路由分组或提供商重命名)不该让 Cursor 已经存下的模型选择失效。
++    let mut parts = vec![request_url, normalized.model_id, normalized.api_key];
+     if normalized.model_type == ModelType::OpenAi {
+         parts.push(normalized.openai_endpoint);
+     }
+diff --git a/server/src/network.rs b/server/src/network.rs
+index 0c02fac..f0c6a99 100644
+--- a/server/src/network.rs
++++ b/server/src/network.rs
+@@ -15,6 +15,7 @@ const LOCAL_NO_PROXY: &str = "localhost,127.0.0.0/8,::1";
+ pub struct NetworkClients {
+     store: Store,
+     cache: Arc<RwLock<ClientCache>>,
++    direct_providers: bool,
+ }
+ 
+ #[derive(Default)]
+@@ -29,6 +30,17 @@ impl NetworkClients {
+         Self {
+             store,
+             cache: Arc::new(RwLock::new(ClientCache::default())),
++            direct_providers: false,
++        }
++    }
++
++    /// 桥接专用:模型请求只发往本机回环的 Magpie 网关,不经过任何代理。
++    /// 系统代理(例如 VPN 切换后残留的失效地址)不该决定一个回环请求的去向;
++    /// 发往 Cursor 上游的 `cursor_client` 仍按代理设置出网。
++    pub fn bridge(store: Store) -> Self {
++        Self {
++            direct_providers: true,
++            ..Self::new(store)
+         }
+     }
+ 
+@@ -80,10 +92,12 @@ impl NetworkClients {
+         {
+             return Ok(client.clone());
+         }
+-        let client = client_builder(&self.store)
+-            .await?
+-            .timeout(timeout)
+-            .build()?;
++        let builder = if self.direct_providers {
++            reqwest::Client::builder().no_proxy()
++        } else {
++            client_builder(&self.store).await?
++        };
++        let client = builder.timeout(timeout).build()?;
+         cache.provider = Some((timeout, client.clone()));
+         Ok(client)
+     }
+@@ -222,4 +236,52 @@ mod tests {
+             "loopback destination unexpectedly reached the configured proxy"
+         );
+     }
++
++    #[tokio::test]
++    async fn bridge_provider_client_ignores_system_proxy() {
++        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let proxy_address = proxy_listener.local_addr().unwrap();
++        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let target_address = target_listener.local_addr().unwrap();
++        let target = tokio::spawn(async move {
++            let (mut socket, _) = target_listener.accept().await.unwrap();
++            let mut request = [0_u8; 1024];
++            let _ = socket.read(&mut request).await.unwrap();
++            socket
++                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
++                .await
++                .unwrap();
++        });
++        let dir = tempfile::tempdir().unwrap();
++        let store = Store::connect(&format!("sqlite://{}", dir.path().join("test.db").display()))
++            .await
++            .unwrap();
++        // reqwest 在构建客户端时读取环境/系统代理;NO_PROXY 非空时不再回落到
++        // 注册表的 ProxyOverride(其中可能含 127.*),使测试与本机设置无关。
++        std::env::set_var("HTTP_PROXY", format!("http://{proxy_address}"));
++        std::env::set_var("NO_PROXY", "unrelated.invalid");
++        let client = NetworkClients::bridge(store)
++            .provider_client(Duration::from_secs(5))
++            .await;
++        std::env::remove_var("HTTP_PROXY");
++        std::env::remove_var("NO_PROXY");
++        let body = client
++            .unwrap()
++            .get(format!("http://{target_address}"))
++            .send()
++            .await
++            .unwrap()
++            .text()
++            .await
++            .unwrap();
++
++        assert_eq!(body, "ok");
++        target.await.unwrap();
++        assert!(
++            tokio::time::timeout(Duration::from_millis(50), proxy_listener.accept())
++                .await
++                .is_err(),
++            "bridge provider request unexpectedly went through the system proxy"
++        );
++    }
+ }
 diff --git a/server/src/store/models.rs b/server/src/store/models.rs
-index 6d29d3c..f47ac3e 100644
+index 6d29d3c..cde9106 100644
 --- a/server/src/store/models.rs
 +++ b/server/src/store/models.rs
 @@ -20,6 +20,28 @@ const MODEL_COLUMNS: &str = r#"
@@ -300,8 +1871,8 @@ index 6d29d3c..f47ac3e 100644
 +        }
 +        let _write = self.writes.lock().await;
 +        let mut transaction = self.pool.begin().await?;
-+        // Calls keep their request/response bodies; removing a catalogue must not violate FK constraints.
-+        sqlx::query("UPDATE llm_calls SET model_hash = NULL").execute(&mut *transaction).await?;
++        // llm_calls.model_hash is history, not a foreign key, so replacing the
++        // catalogue leaves earlier calls attributed to the route they used.
 +        sqlx::query("DELETE FROM model_configs").execute(&mut *transaction).await?;
 +        let now = now_ms();
 +        for (hash, input) in normalized { insert_model(&mut transaction, &hash, &input, now).await?; }
@@ -312,210 +1883,711 @@ index 6d29d3c..f47ac3e 100644
      pub async fn models(&self) -> Result<Vec<ModelConfig>> {
          let query =
              format!("SELECT {MODEL_COLUMNS} FROM model_configs ORDER BY sort_order, display_name");
-diff --git a/server/src/bin/cursor-magpie-bridge.rs b/server/src/bin/cursor-magpie-bridge.rs
-new file mode 100644
-index 0000000..2a625b6
---- /dev/null
-+++ b/server/src/bin/cursor-magpie-bridge.rs
-@@ -0,0 +1,147 @@
-+//! Headless Cursor protocol bridge. No desktop/account writes or management API.
-+use std::{path::PathBuf, sync::Arc, time::Duration};
-+use cursor_server::{api, config, cursor::{prompting::{PromptAssets, PromptCompiler}, transport::TransportRegistry}, local_app::CursorHarness, model::ModelConfigInput, network::NetworkClients, plugin::{PluginRegistry, PluginRuntime}, provider::ProviderRouter, search::WebCache, store::Store};
-+use serde::Deserialize;
-+use serde_json::json;
-+use tokio_util::sync::CancellationToken;
+@@ -398,4 +420,33 @@ mod tests {
+         assert_eq!(cleared.model_hash, created.model_hash);
+         assert_eq!(cleared.group_name, None);
+     }
 +
-+#[derive(Deserialize)]
-+struct Connection { gateway: String, key: String, model: String, models: Vec<BridgeModel> }
-+#[derive(Deserialize)]
-+struct BridgeModel { id: String, #[serde(default)] name: String, context: Option<u64> }
++    /// 显示名同样是标签:Cursor 记录的模型选择就是身份哈希,
++    /// 在 Magpie 里给同一个路由改名不该让已选中的模型退回默认。
++    #[tokio::test]
++    async fn renaming_a_model_keeps_the_selection_cursor_stored() {
++        let directory = tempfile::tempdir().unwrap();
++        let store = Store::connect(&format!(
++            "sqlite://{}",
++            directory.path().join("test.db").display()
++        ))
++        .await
++        .unwrap();
 +
-+fn catalogue(bytes: &[u8]) -> Result<Vec<ModelConfigInput>, Box<dyn std::error::Error>> {
-+    let c: Connection = serde_json::from_slice(bytes)?;
-+    let url = url::Url::parse(&c.gateway)?;
-+    if url.scheme() != "http" || !matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
-+        return Err("only a loopback Magpie gateway is supported".into());
++        let created = store.create_model(&model_input(None)).await.unwrap();
++        let renamed = store
++            .update_model(
++                &created.model_hash,
++                &ModelConfigInput {
++                    display_name: "DeepSeek-V4.1-Flash · DeepSeek".into(),
++                    ..model_input(None)
++                },
++            )
++            .await
++            .unwrap();
++
++        assert_eq!(renamed.model_hash, created.model_hash);
++        assert_eq!(renamed.display_name, "DeepSeek-V4.1-Flash · DeepSeek");
++        assert_eq!(store.models().await.unwrap().len(), 1);
 +    }
-+    if c.key.trim().is_empty() || !c.models.iter().any(|m| m.id == c.model) { return Err("missing gateway key or selected model".into()); }
-+    let mut models = c.models;
-+    models.sort_by_key(|m| m.id != c.model);
-+    let mut seen = std::collections::HashSet::new();
-+    models.into_iter().enumerate().map(|(i,m)| {
-+        if !seen.insert(m.id.clone()) { return Err("duplicate model id".into()); }
-+        Ok(serde_json::from_value(json!({
-+            "sort_order": i, "display_name": if m.name.is_empty() {m.id.clone()} else {format!("{} · {}", m.name, m.id)},
-+            "group_name":"Magpie", "type":"openai", "base_url": c.gateway.trim_end_matches('/'),
-+            "api_key":c.key, "tooltip_data":format!("Magpie / {}",m.id), "model_id":m.id,
-+            "context_window_tokens":m.context.filter(|v| *v > 0),
-+            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.1"}
-+        }))?)
-+    }).collect()
+ }
+diff --git a/server/tests/bridge_bidi_wire.rs b/server/tests/bridge_bidi_wire.rs
+new file mode 100644
+index 0000000..4a9734b
+--- /dev/null
++++ b/server/tests/bridge_bidi_wire.rs
+@@ -0,0 +1,60 @@
++use cursor_server::{api::cursor::bidi, cursor::protocol::proto::{agent::v1 as pb, aiserver::v1 as ai}};
++use prost::Message;
++
++fn request(payload: &[u8], binary: bool) -> ai::BidiAppendRequest {
++    ai::BidiAppendRequest {
++        request_id: Some(ai::BidiRequestId { request_id: "wire-regression".into() }),
++        data: if binary { String::new() } else { hex::encode(payload) },
++        data_binary: if binary { payload.to_vec() } else { vec![] },
++        ..Default::default()
++    }
 +}
 +
-+#[tokio::main]
-+async fn main() -> Result<(), Box<dyn std::error::Error>> {
-+    let argument = std::env::args().nth(1);
-+    if argument.as_deref() == Some("--version") {
-+        println!("0.2.1");
-+        return Ok(());
++#[test]
++fn bridge_bidi_hex_and_binary_preserve_state_blob_references() {
++    // Blob references are opaque bytes, not nested protobuf messages.
++    let state = pb::ConversationStateStructure {
++        root_prompt_messages_json: vec![vec![0x06, 0xff, 0x00]],
++        turns: vec![vec![0x06, 0xff]],
++        todos: vec![vec![0xff]],
++        summary: Some(vec![0x06]),
++        ..Default::default()
++    };
++    let message = pb::AgentClientMessage {
++        message: Some(pb::agent_client_message::Message::RunRequest(pb::AgentRunRequest {
++            conversation_state: Some(state),
++            conversation_id: Some("synthetic".into()),
++            ..Default::default()
++        })),
++    };
++    let bytes = message.encode_to_vec();
++    for binary in [false, true] {
++        let decoded = bidi::decode(&request(&bytes, binary)).unwrap();
++        assert_eq!(decoded.message, message);
++        assert_eq!(decoded.seqno, 0);
 +    }
-+    if argument.as_deref() == Some("--help") || argument.is_none() {
-+        println!("cursor-magpie-bridge 0.2.1\nUsage: cursor-magpie-bridge --init-ca | CONNECTION.json\nRequires CURSOR_BYOK_DATA_DIR (absolute path). --init-ca never modifies certificate trust.");
-+        return Ok(());
++}
++
++#[test]
++fn bridge_bidi_rejects_ambiguous_and_empty_envelopes() {
++    let mut value = request(&[0x3a, 0], true);
++    value.data = "3a00".into();
++    assert!(bidi::decode(&value).unwrap_err_string().contains("both data and data_binary"));
++    assert!(bidi::decode(&request(&[], false)).is_err());
++}
++
++trait ErrorString { fn unwrap_err_string(self) -> String; }
++impl ErrorString for cursor_server::Result<bidi::DecodedAppend> {
++    fn unwrap_err_string(self) -> String { match self { Err(e) => e.to_string(), Ok(_) => panic!("expected error") } }
++}
++
++#[test]
++fn bridge_bidi_invalid_state_reproduces_cursor_error_without_tls() {
++    // AgentClientMessage.run_request -> conversation_state -> illegal wire type 6.
++    let bytes = [0x0a, 0x03, 0x0a, 0x01, 0x06];
++    for binary in [false, true] {
++        let error = bidi::decode(&request(&bytes, binary)).unwrap_err_string();
++        assert!(error.contains("AgentRunRequest.conversation_state") && error.contains("d2@0:invalid-key"), "{error}");
++        assert!(error.contains("invalid wire type value: 6"), "{error}");
 +    }
-+    // A dedicated directory is mandatory: never open the desktop BYOK database.
-+    if std::env::var_os("CURSOR_BYOK_DATA_DIR").is_none() { return Err("CURSOR_BYOK_DATA_DIR is required".into()); }
-+    if argument.as_deref() == Some("--init-ca") {
-+        let state = cursor_server::local_app::initialize_bridge_ca()?;
-+        println!("{}", json!({"ca":state, "certificate":config::managed_data_dir()?.join("ca/ca.crt")}));
-+        return Ok(());
++}
+diff --git a/server/tests/bridge_route.rs b/server/tests/bridge_route.rs
+new file mode 100644
+index 0000000..8ff1216
+--- /dev/null
++++ b/server/tests/bridge_route.rs
+@@ -0,0 +1,266 @@
++//! Verifies that a dedicated bridge never hands a Cursor Run to Cursor's own
++//! backend. Cursor names the Run model from the catalogue it last read, so it
++//! can ask for its own Auto (`default`) or for a hash a replaced catalogue no
++//! longer contains; an account without Agent quota answers such a Run with
++//! `ResourceExhausted`, which the editor shows as "You've hit your usage limit".
++#[path = "support/fake_provider.rs"]
++mod fake_provider;
++#[path = "support/fixtures.rs"]
++mod fixtures;
++
++use std::{path::Path, sync::Arc, time::Duration};
++
++use axum::{
++    body::Body,
++    http::{header, Request, StatusCode},
++};
++use cursor_server::{
++    api::cursor::{self, bidi::BridgeRoute},
++    cursor::{
++        prompting::{PromptAssets, PromptCompiler},
++        protocol::{
++            connect,
++            proto::{agent::v1 as pb, aiserver::v1 as ai},
++        },
++        transport::TransportRegistry,
++        TransportCommand, TransportHandle,
++    },
++    model::{ModelConfigInput, ModelType, ModelRequest, OPENAI_CHAT_ENDPOINT},
++    network::NetworkClients,
++    provider::{FinishReason, ModelEvent},
++};
++use prost::Message;
++use tower::ServiceExt;
++
++fn model_input(openai_model: &str) -> ModelConfigInput {
++    ModelConfigInput {
++        sort_order: 1,
++        display_name: format!("{openai_model} · Magpie"),
++        group_name: None,
++        model_type: ModelType::OpenAi,
++        base_url: "http://127.0.0.1:3425/v1".into(),
++        use_full_url: false,
++        api_key: "magpie-cursor-bridge".into(),
++        tooltip_data: format!("Magpie / {openai_model}"),
++        model_id: openai_model.into(),
++        reasoning_effort: None,
++        openai_endpoint: OPENAI_CHAT_ENDPOINT.into(),
++        openai_extra_params_enabled: false,
++        openai_extra_params: serde_json::json!({}),
++        custom_headers_enabled: false,
++        custom_headers: serde_json::json!({}),
++        anthropic_extra_params_enabled: false,
++        anthropic_extra_params: serde_json::json!({}),
++        context_window_tokens: None,
++        max_completion_tokens: None,
++        anthropic_max_tokens: None,
++        anthropic_thinking_effort: None,
++        thinking_budget_tokens: None,
 +    }
-+    let path = PathBuf::from(argument.unwrap());
-+    let mut contents = tokio::fs::read(&path).await?;
-+    let inputs = catalogue(&contents)?;
-+    let root = config::managed_data_dir()?;
-+    let store = Store::connect(&format!("sqlite://{}",root.join("bridge.db").display())).await?;
-+    store.replace_bridge_models(&inputs).await?;
-+    let plugins = PluginRegistry::managed(store.clone(), PluginRuntime::managed()?, "1.0.1".into())?;
-+    let clients = NetworkClients::new(store.clone());
-+    let provider = Arc::new(ProviderRouter::new(store.clone(),plugins.clone(),clients.clone(),Duration::from_secs(3600),Duration::from_secs(1800)));
-+    let registry = TransportRegistry::with_plugins(store.clone(),provider,PromptCompiler::new(PromptAssets::embedded()?),WebCache::managed()?,plugins,root.join("rules"));
-+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-+    let address = listener.local_addr()?;
-+    registry.web_cache().set_service_addr(address);
-+    let router = api::router(registry.clone(),clients)?
-+        .layer(axum::Extension(cursor_server::cursor::services::model_catalog::LocalCatalogOnly));
-+    let harness = CursorHarness::new(store.clone())?;
-+    harness.set_backend_addr(address);
-+    let proxy = harness.start_proxy_only().await?;
-+    let shutdown = CancellationToken::new();
-+    let cancel = shutdown.clone();
-+    let server = tokio::spawn(async move { axum::serve(listener,router).with_graceful_shutdown(async move {cancel.cancelled().await}).await });
-+    println!("{}",json!({"event":"ready","proxy":proxy,"backend":format!("http://{address}"),"models":inputs.len()}));
-+    // The supervisor owns stdin. Its death must not leave an orphan TLS proxy.
-+    let parent_closed = CancellationToken::new();
-+    let parent_signal = parent_closed.clone();
-+    std::thread::spawn(move || {
-+        use std::io::Read;
-+        let mut buf = [0u8; 64];
-+        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
-+        parent_signal.cancel();
-+    });
-+    let mut interval = tokio::time::interval(Duration::from_secs(2));
-+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-+    loop {
-+        tokio::select! {
-+            _ = tokio::signal::ctrl_c() => break,
-+            _ = sigterm.recv() => break,
-+            _ = parent_closed.cancelled() => break,
-+            _ = interval.tick() => {
-+                if server.is_finished() { break; }
-+                match tokio::fs::read(&path).await {
-+                    Ok(next) if next != contents => match catalogue(&next) {
-+                        Ok(inputs) => {
-+                            if store.replace_bridge_models(&inputs).await.is_ok() {
-+                                contents = next;
-+                                println!("{}",json!({"event":"catalogue","models":inputs.len()}));
-+                            } else { eprintln!("catalogue update failed; retaining last complete catalogue"); }
-+                        }
-+                        Err(_) => eprintln!("invalid catalogue; retaining last complete catalogue"),
-+                    },
-+                    _ => {},
++}
++
++fn user_turn(model_id: &str) -> pb::AgentClientMessage {
++    pb::AgentClientMessage {
++        message: Some(pb::agent_client_message::Message::RunRequest(
++            pb::AgentRunRequest {
++                action: Some(pb::ConversationAction {
++                    action: Some(pb::conversation_action::Action::UserMessageAction(
++                        pb::UserMessageAction {
++                            user_message: Some(pb::UserMessage {
++                                text: "hello".into(),
++                                message_id: "bridge-user".into(),
++                                mode: pb::AgentMode::Agent as i32,
++                                ..Default::default()
++                            }),
++                            ..Default::default()
++                        },
++                    )),
++                    ..Default::default()
++                }),
++                conversation_id: Some("bridge-conversation".into()),
++                run_id: Some("bridge-run".into()),
++                requested_model: Some(pb::RequestedModel {
++                    model_id: model_id.into(),
++                    ..Default::default()
++                }),
++                model_details: Some(pb::ModelDetails {
++                    model_id: model_id.into(),
++                    ..Default::default()
++                }),
++                ..Default::default()
++            },
++        )),
++    }
++}
++
++fn append(request_id: &str, message: &pb::AgentClientMessage) -> Vec<u8> {
++    ai::BidiAppendRequest {
++        request_id: Some(ai::BidiRequestId {
++            request_id: request_id.into(),
++        }),
++        data_binary: message.encode_to_vec(),
++        ..Default::default()
++    }
++    .encode_to_vec()
++}
++
++fn kv_ack(id: u32) -> pb::AgentClientMessage {
++    pb::AgentClientMessage {
++        message: Some(pb::agent_client_message::Message::KvClientMessage(
++            pb::KvClientMessage {
++                id,
++                message: Some(pb::kv_client_message::Message::SetBlobResult(
++                    pb::SetBlobResult { error: None },
++                )),
++            },
++        )),
++    }
++}
++
++fn stop_response(model_call_id: &str, text: &str) -> Vec<ModelEvent> {
++    vec![
++        ModelEvent::Start {
++            model_call_id: model_call_id.into(),
++        },
++        ModelEvent::TextStart,
++        ModelEvent::TextDelta(text.into()),
++        ModelEvent::TextEnd,
++        ModelEvent::Done(FinishReason::Stop),
++    ]
++}
++
++/// Answer the client interactions a Run needs until the model is called; a
++/// bridge serves every Run locally, so reaching the provider is the assertion.
++async fn model_requests(
++    handle: &TransportHandle,
++    provider: &fake_provider::FakeProvider,
++) -> Vec<ModelRequest> {
++    let mut output = handle.subscribe();
++    let mut seqno = 1;
++    tokio::time::timeout(Duration::from_secs(10), async {
++        while provider.requests().is_empty() {
++            let Ok(Some(frame)) =
++                tokio::time::timeout(Duration::from_millis(50), output.recv()).await
++            else {
++                continue;
++            };
++            let (flags, payload) = connect::decode_frames(&frame).unwrap().pop().unwrap();
++            if flags & connect::END_STREAM_FLAG != 0 {
++                panic!("Run ended before the model was called");
++            }
++            let server = pb::AgentServerMessage::decode(payload).unwrap();
++            let reply = match server.message {
++                Some(pb::agent_server_message::Message::KvServerMessage(kv)) => Some(kv_ack(kv.id)),
++                Some(pb::agent_server_message::Message::ExecServerMessage(exec)) => {
++                    Some(pb::AgentClientMessage {
++                        message: Some(
++                            pb::agent_client_message::Message::ExecClientControlMessage(
++                                pb::ExecClientControlMessage {
++                                    message: Some(
++                                        pb::exec_client_control_message::Message::StreamClose(
++                                            pb::ExecClientStreamClose { id: exec.id },
++                                        ),
++                                    ),
++                                },
++                            ),
++                        ),
++                    })
 +                }
++                _ => None,
++            };
++            if let Some(reply) = reply {
++                handle
++                    .command(TransportCommand::Append {
++                        seqno,
++                        message: Box::new(reply),
++                    })
++                    .await
++                    .unwrap();
++                seqno += 1;
 +            }
 +        }
-+    }
-+    harness.stop_proxy_only().await;
-+    registry.shutdown().await;
-+    shutdown.cancel();
-+    let _ = tokio::time::timeout(Duration::from_secs(10),server).await;
-+    Ok(())
++    })
++    .await
++    .expect("the model must be called");
++    provider.requests()
 +}
 +
-+#[cfg(test)]
-+mod tests {
-+    use super::*;
-+    fn config() -> serde_json::Value { json!({"gateway":"http://127.0.0.1:3425/v1","key":"test-only","model":"p/b","models":[{"id":"p/a","name":"A","context":200000},{"id":"p/b","name":"B"}]}) }
-+    #[test]
-+    fn selected_model_first_and_route_preserved() {
-+        let models=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap();
-+        assert_eq!(models[0].model_id,"p/b");
-+        assert_eq!(models[1].context_window_tokens,Some(200000));
-+        assert_eq!(models[0].base_url,"http://127.0.0.1:3425/v1");
-+        assert_eq!(models[0].api_key,"test-only");
-+    }
-+    #[test]
-+    fn rejects_remote_and_duplicate_models() {
-+        let mut c=config();c["gateway"]=json!("http://evil.example/v1");assert!(catalogue(&serde_json::to_vec(&c).unwrap()).is_err());
-+        let mut c=config();c["models"]=json!([{"id":"p/b"},{"id":"p/b"}]);assert!(catalogue(&serde_json::to_vec(&c).unwrap()).is_err());
-+    }
-+    #[tokio::test]
-+    async fn catalogue_update_is_atomic_and_retains_last_valid_models() {
-+        let dir=tempfile::tempdir().unwrap();
-+        let store=Store::connect(&format!("sqlite://{}",dir.path().join("test.db").display())).await.unwrap();
-+        let inputs=catalogue(&serde_json::to_vec(&config()).unwrap()).unwrap();
-+        store.replace_bridge_models(&inputs).await.unwrap();
-+        let duplicate=vec![inputs[0].clone(),inputs[0].clone()];
-+        assert!(store.replace_bridge_models(&duplicate).await.is_err());
-+        assert_eq!(store.models().await.unwrap().len(),2);
-+        let mut invalid=inputs.clone();invalid[1].api_key="".into();
-+        assert!(store.replace_bridge_models(&invalid).await.is_err());
-+        assert_eq!(store.models().await.unwrap().len(),2);
-+        store.replace_bridge_models(&inputs[..1]).await.unwrap();
-+        assert_eq!(store.models().await.unwrap().len(),1);
-+    }
++/// Cursor's Auto travels as `default`, which names no Magpie route: the bridge
++/// must run it on the route Magpie selected instead of forwarding it upstream.
++#[tokio::test]
++async fn cursor_auto_runs_on_the_magpie_route() {
++    let (_directory, store) = fixtures::temp_store().await;
++    let other = store.create_model(&model_input("p/a")).await.unwrap();
++    let selected = store.create_model(&model_input("p/b")).await.unwrap();
++    let provider = fake_provider::FakeProvider::default();
++    provider.push(stop_response("auto-call", "hi"));
++    let assets =
++        PromptAssets::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("prompt/cursor").as_path())
++            .unwrap();
++    let registry = TransportRegistry::new(
++        store.clone(),
++        Arc::new(provider.clone()),
++        PromptCompiler::new(assets),
++    );
++    let router = cursor::router(registry.clone(), NetworkClients::new(store))
++        .unwrap()
++        .layer(axum::Extension(BridgeRoute::new("p/b")));
++
++    let response = router
++        .oneshot(
++            Request::post("/aiserver.v1.BidiService/BidiAppend")
++                .header(header::CONTENT_TYPE, "application/proto")
++                .body(Body::from(append("auto-request", &user_turn("default"))))
++                .unwrap(),
++        )
++        .await
++        .unwrap();
++
++    assert_eq!(response.status(), StatusCode::OK);
++    assert!(
++        !registry.upstream("auto-request").await,
++        "a bridge must never forward a Run to Cursor's backend"
++    );
++    let handle = registry.local("auto-request").await.expect("local transport");
++    let requests = model_requests(&handle, &provider).await;
++    assert_eq!(requests.len(), 1);
++    assert_eq!(requests[0].model.model_id, selected.model_hash);
++    assert_ne!(requests[0].model.model_id, other.model_hash);
 +}
-diff --git a/server/examples/magpie_smoke.rs b/server/examples/magpie_smoke.rs
++
++/// A catalogue route Cursor names stays exactly as the client selected it.
++#[tokio::test]
++async fn a_route_the_catalogue_serves_is_left_alone() {
++    let (_directory, store) = fixtures::temp_store().await;
++    let other = store.create_model(&model_input("p/a")).await.unwrap();
++    let selected = store.create_model(&model_input("p/b")).await.unwrap();
++    let provider = fake_provider::FakeProvider::default();
++    provider.push(stop_response("hash-call", "hi"));
++    let assets =
++        PromptAssets::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("prompt/cursor").as_path())
++            .unwrap();
++    let registry = TransportRegistry::new(
++        store.clone(),
++        Arc::new(provider.clone()),
++        PromptCompiler::new(assets),
++    );
++    let router = cursor::router(registry.clone(), NetworkClients::new(store))
++        .unwrap()
++        .layer(axum::Extension(BridgeRoute::new("p/b")));
++
++    let response = router
++        .oneshot(
++            Request::post("/aiserver.v1.BidiService/BidiAppend")
++                .header(header::CONTENT_TYPE, "application/proto")
++                .body(Body::from(append("hash-request", &user_turn(&other.model_hash))))
++                .unwrap(),
++        )
++        .await
++        .unwrap();
++
++    assert_eq!(response.status(), StatusCode::OK);
++    let handle = registry.local("hash-request").await.expect("local transport");
++    let requests = model_requests(&handle, &provider).await;
++    assert_eq!(requests[0].model.model_id, other.model_hash);
++    assert_ne!(requests[0].model.model_id, selected.model_hash);
++}
+diff --git a/server/tests/commit_message.rs b/server/tests/commit_message.rs
+index 80be55a..4814d57 100644
+--- a/server/tests/commit_message.rs
++++ b/server/tests/commit_message.rs
+@@ -249,3 +249,96 @@ async fn unconfigured_model_is_rejected() {
+     let text = std::str::from_utf8(&body).unwrap();
+     assert!(text.contains("missing-hash"));
+ }
++
++async fn post_branch_name(
++    router: axum::Router,
++    request: ai::WriteGitBranchNameRequest,
++) -> axum::response::Response {
++    let body = connect::encode_message(&request).unwrap();
++    router
++        .oneshot(
++            Request::post("/aiserver.v1.AiService/WriteGitBranchName")
++                .header(header::CONTENT_TYPE, "application/proto")
++                .body(Body::from(body))
++                .unwrap(),
++        )
++        .await
++        .unwrap()
++}
++
++#[tokio::test]
++async fn branch_name_is_generated_through_configured_model() {
++    let (_directory, store) = fixtures::temp_store().await;
++    let created = store
++        .create_model(&model_input("qwen/qwen3-flash"))
++        .await
++        .unwrap();
++    store
++        .set_commit_settings(CommitSettings {
++            model_id: created.model_hash.clone(),
++            prompt: String::new(),
++            prompt_locale: CommitPromptLocale::ZhCn,
++        })
++        .await
++        .unwrap();
++    let provider = fake_provider::FakeProvider::default();
++    provider.push(vec![
++        ModelEvent::TextStart,
++        ModelEvent::TextDelta("```\nfeat/add commit engine\n```".into()),
++        ModelEvent::TextEnd,
++        ModelEvent::Done(FinishReason::Stop),
++    ]);
++    let router = commit_router(store, provider.clone()).await;
++
++    let response = post_branch_name(
++        router,
++        ai::WriteGitBranchNameRequest {
++            diffs: "diff --git a/engine.rs".into(),
++            context: Some("make it short".into()),
++        },
++    )
++    .await;
++
++    assert_eq!(response.status(), StatusCode::OK);
++    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
++    let decoded: ai::WriteGitBranchNameResponse = prost::Message::decode(&body[..]).unwrap();
++    assert_eq!(decoded.branch_name, "feat/add-commit-engine");
++
++    let requests = provider.requests();
++    assert_eq!(requests.len(), 1);
++    // The same configured model serves branch names, so one setting covers both.
++    assert_eq!(requests[0].model.model_id, created.model_hash);
++    let ProjectedContent::Parts(parts) = &requests[0].history[0].content else {
++        panic!("expected user text parts");
++    };
++    let ContentPart::Text { text } = &parts[0] else {
++        panic!("expected text part");
++    };
++    assert!(text.contains("diff --git a/engine.rs"));
++    assert!(text.contains("make it short"));
++}
++
++#[tokio::test]
++async fn branch_name_rejects_empty_diffs() {
++    let (_directory, store) = fixtures::temp_store().await;
++    let created = store
++        .create_model(&model_input("qwen/qwen3-flash"))
++        .await
++        .unwrap();
++    store
++        .set_commit_settings(CommitSettings {
++            model_id: created.model_hash,
++            prompt: String::new(),
++            prompt_locale: CommitPromptLocale::ZhCn,
++        })
++        .await
++        .unwrap();
++    let router = commit_router(store, fake_provider::FakeProvider::default()).await;
++
++    let response = post_branch_name(router, ai::WriteGitBranchNameRequest::default()).await;
++
++    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
++    let body = to_bytes(response.into_body(), 4096).await.unwrap();
++    let text = std::str::from_utf8(&body).unwrap();
++    assert!(text.contains("diffs are required"));
++}
+diff --git a/server/tests/error_lifecycle.rs b/server/tests/error_lifecycle.rs
+index 250a937..1cea9f1 100644
+--- a/server/tests/error_lifecycle.rs
++++ b/server/tests/error_lifecycle.rs
+@@ -601,8 +601,8 @@ async fn parent_request_does_not_need_to_resolve_to_an_active_run() {
+     assert_run_starts_without_parent_dependency(
+         "finished-parent-request",
+         Some(TransportParent {
+-            request_id: "already-finished-parent".into(),
+-            tool_call_id: "original-tool-call".into(),
++            request_id: Some("already-finished-parent".into()),
++            tool_call_id: Some("original-tool-call".into()),
+         }),
+         None,
+     )
+diff --git a/server/tests/shell_output.rs b/server/tests/shell_output.rs
 new file mode 100644
-index 0000000..9590ae9
+index 0000000..790ae9e
 --- /dev/null
-+++ b/server/examples/magpie_smoke.rs
-@@ -0,0 +1,48 @@
-+//! Explicit live smoke test: args are proxy URL and catalogue model hash.
-+use cursor_server::cursor::protocol::{connect,proto::{agent::v1 as pb,aiserver::v1 as ai}};
++++ b/server/tests/shell_output.rs
+@@ -0,0 +1,214 @@
++//! Shell output must survive the Cursor wire -> canonical tool-result boundary.
++use cursor_server::{
++    cursor::{
++        protocol::proto::agent::v1 as pb,
++        tools::{
++            codec,
++            runtime::{CursorToolRuntime, ExecContext},
++        },
++    },
++    model::ToolCall,
++};
 +use prost::Message;
-+use futures_util::StreamExt;
-+use std::time::Duration;
-+async fn append(client:&reqwest::Client,id:&str,seq:i64,message:pb::AgentClientMessage) -> Result<(),Box<dyn std::error::Error>> {
-+ let body=ai::BidiAppendRequest{data:hex::encode(message.encode_to_vec()),request_id:Some(ai::BidiRequestId{request_id:id.into()}),append_seqno:seq,..Default::default()};
-+ let r=client.post("https://api2.cursor.sh/aiserver.v1.BidiService/BidiAppend").header("Content-Type","application/proto").body(body.encode_to_vec()).send().await?;
-+ if !r.status().is_success(){return Err(format!("append {}: {}",r.status(),r.text().await?).into());} Ok(())
++use serde_json::json;
++
++fn call() -> ToolCall {
++    ToolCall {
++        index: 0,
++        call_id: "shell-output".into(),
++        model_call_id: "model:0".into(),
++        name: "Shell".into(),
++        arguments_text: String::new(),
++        arguments: json!({"command":"synthetic-fixture"}),
++        argument_error: None,
++    }
 +}
-+#[tokio::main]
-+async fn main()->Result<(),Box<dyn std::error::Error>>{
-+ let args:Vec<_>=std::env::args().collect();
-+ let client=reqwest::Client::builder().proxy(reqwest::Proxy::all(&args[1])?).timeout(Duration::from_secs(120)).build()?;
-+ let id=format!("bridge-smoke-{}",uuid::Uuid::new_v4());
-+ let message=pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::RunRequest(pb::AgentRunRequest{
-+ action:Some(pb::ConversationAction{action:Some(pb::conversation_action::Action::UserMessageAction(pb::UserMessageAction{user_message:Some(pb::UserMessage{text:"Reply with exactly MAGPIE_BRIDGE_OK. Do not call any tools.".into(),message_id:format!("{id}-user"),mode:pb::AgentMode::Agent as i32,..Default::default()}),..Default::default()})),..Default::default()}),
-+ conversation_id:Some(id.clone()),run_id:Some(id.clone()),requested_model:Some(pb::RequestedModel{model_id:args[2].clone(),..Default::default()}),..Default::default()}))};
-+ append(&client,&id,0,message).await?;
-+ let response=client.post("https://api2.cursor.sh/agent.v1.AgentService/RunSSE").header("Content-Type","application/proto").body(pb::BidiRequestId{request_id:id.clone()}.encode_to_vec()).send().await?.error_for_status()?;
-+ let mut stream=response.bytes_stream();let mut buffer=Vec::new();let mut seq=1;let mut text=String::new();
-+ while let Some(chunk)=stream.next().await {
-+  buffer.extend_from_slice(&chunk?);
-+  while buffer.len()>=5 {
-+   let len=u32::from_be_bytes(buffer[1..5].try_into()?) as usize;
-+   if buffer.len()<len+5 {break;}
-+   let frame:Vec<_>=buffer.drain(..len+5).collect();
-+   if frame[0]&connect::END_STREAM_FLAG!=0 {
-+    let end:serde_json::Value=serde_json::from_slice(&frame[5..])?;
-+    if end.get("error").is_some(){return Err(format!("stream error: {end}").into());}
-+    if !text.contains("MAGPIE_BRIDGE_OK"){return Err(format!("unexpected response: {text}").into());}
-+    println!("TLS proxy -> Cursor Bidi/RunSSE -> Magpie -> model -> Cursor stream: {text}");return Ok(());
-+   }
-+   let server=pb::AgentServerMessage::decode(&frame[5..])?;
-+   let reply=match server.message {
-+    Some(pb::agent_server_message::Message::InteractionUpdate(u))=>{if let Some(pb::interaction_update::Message::TextDelta(t))=u.message{text.push_str(&t.text);}None},
-+    Some(pb::agent_server_message::Message::KvServerMessage(kv))=>Some(pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::KvClientMessage(pb::KvClientMessage{id:kv.id,message:Some(pb::kv_client_message::Message::SetBlobResult(pb::SetBlobResult{error:None}))}))}),
-+    Some(pb::agent_server_message::Message::ExecServerMessage(exec))=>{
-+      if !matches!(exec.message,Some(pb::exec_server_message::Message::RequestContextArgs(_))){return Err("model requested an unexpected tool".into());}
-+      append(&client,&id,seq,pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::ExecClientControlMessage(pb::ExecClientControlMessage{message:Some(pb::exec_client_control_message::Message::StreamClose(pb::ExecClientStreamClose{id:exec.id}))}))}).await?;seq+=1;
-+      Some(pb::AgentClientMessage{message:Some(pb::agent_client_message::Message::ExecClientMessage(pb::ExecClientMessage{id:exec.id,message:Some(pb::exec_client_message::Message::RequestContextResult(pb::RequestContextResult{result:Some(pb::request_context_result::Result::Success(pb::RequestContextSuccess{request_context:Some(pb::RequestContext::default()),..Default::default()}))})),..Default::default()}))})
-+    },_=>None
-+   };
-+   if let Some(reply)=reply{append(&client,&id,seq,reply).await?;seq+=1;}
-+  }
-+ }
-+ Err("stream closed before successful end".into())
++fn location() -> pb::OutputLocation {
++    pb::OutputLocation {
++        file_path: "/remote-only/output/result.txt".into(),
++        size_bytes: 50001,
++        line_count: 123,
++    }
++}
++async fn complete(message: pb::exec_client_message::Message) -> cursor_server::model::ToolResult {
++    let runtime = CursorToolRuntime::default();
++    let id = runtime
++        .reserve_exec(&call(), &ExecContext::default())
++        .await
++        .unwrap();
++    // Exercise serialization, not only construction of Rust values.
++    let wire = pb::ExecClientMessage {
++        id,
++        message: Some(message),
++        ..Default::default()
++    }
++    .encode_to_vec();
++    let decoded = pb::ExecClientMessage::decode(wire.as_slice()).unwrap();
++    match codec::client_event(&decoded, &runtime).await.unwrap() {
++        codec::ClientExecEvent::Completed(result) => result.result().clone(),
++        _ => panic!("expected completed tool result"),
++    }
++}
++#[tokio::test]
++async fn terminal_file_and_excerpt_output_survives_success_and_failure() {
++    for failed in [false, true] {
++        let result = if failed {
++            pb::shell_result::Result::Failure(pb::ShellFailure {
++                output_location: Some(location()),
++                output_head: Some("FIRST-LINE".into()),
++                output_tail: Some("LAST-LINE".into()),
++                elided_chars: Some(40000),
++                exit_code: 1,
++                ..Default::default()
++            })
++        } else {
++            pb::shell_result::Result::Success(pb::ShellSuccess {
++                output_location: Some(location()),
++                output_head: Some("FIRST-LINE".into()),
++                output_tail: Some("LAST-LINE".into()),
++                elided_chars: Some(40000),
++                ..Default::default()
++            })
++        };
++        let completion = complete(pb::exec_client_message::Message::ShellResult(
++            pb::ShellResult {
++                result: Some(result),
++                ..Default::default()
++            },
++        ))
++        .await;
++        let output = &completion.content;
++        for expected in [
++            "/remote-only/output/result.txt",
++            "50001 bytes",
++            "123 lines",
++            "FIRST-LINE",
++            "LAST-LINE",
++            "40000",
++            "Read",
++        ] {
++            assert!(output.contains(expected), "missing {expected}: {output}");
++        }
++        assert!(!output.contains("completed without output"));
++        assert_eq!(completion.is_error, failed);
++    }
++}
++#[tokio::test]
++async fn streamed_exit_preserves_file_reference_and_accumulated_output() {
++    for failed in [false, true] {
++        let runtime = CursorToolRuntime::default();
++        let id = runtime
++            .reserve_exec(&call(), &ExecContext::default())
++            .await
++            .unwrap();
++        for text in ["", "streamed marker"] {
++            let _ = codec::client_event(
++                &pb::ExecClientMessage {
++                    id,
++                    message: Some(pb::exec_client_message::Message::ShellStream(
++                        pb::ShellStream {
++                            event: Some(pb::shell_stream::Event::Stdout(pb::ShellStreamStdout {
++                                data: text.into(),
++                            })),
++                        },
++                    )),
++                    ..Default::default()
++                },
++                &runtime,
++            )
++            .await
++            .unwrap();
++        }
++        let event = codec::client_event(
++            &pb::ExecClientMessage {
++                id,
++                message: Some(pb::exec_client_message::Message::ShellStream(
++                    pb::ShellStream {
++                        event: Some(pb::shell_stream::Event::Exit(pb::ShellStreamExit {
++                            code: u32::from(failed),
++                            output_location: Some(location()),
++                            ..Default::default()
++                        })),
++                    },
++                )),
++                ..Default::default()
++            },
++            &runtime,
++        )
++        .await
++        .unwrap();
++        let codec::ClientExecEvent::Completed(completion) = event else {
++            panic!("expected completion")
++        };
++        assert!(completion
++            .result()
++            .content
++            .contains("/remote-only/output/result.txt"));
++        assert!(completion.result().content.contains("streamed marker"));
++        assert_eq!(completion.result().is_error, failed);
++        let Some(pb::tool_call::Tool::ShellToolCall(tool)) = &completion.tool_call().tool else {
++            panic!("expected Shell UI state")
++        };
++        let result = tool.result.as_ref().unwrap().result.as_ref().unwrap();
++        let file = match result {
++            pb::shell_result::Result::Success(s) => s.output_location.as_ref(),
++            pb::shell_result::Result::Failure(s) => s.output_location.as_ref(),
++            _ => panic!("unexpected result"),
++        };
++        assert_eq!(file.unwrap().file_path, location().file_path);
++    }
++}
++#[tokio::test]
++async fn output_variants_and_sandbox_errors_are_not_misreported() {
++    for (success, expected) in [
++        (
++            pb::ShellSuccess {
++                stdout: "stdout".into(),
++                stderr: "stderr".into(),
++                ..Default::default()
++            },
++            "stdout\n\n<stderr>\nstderr\n</stderr>",
++        ),
++        (
++            pb::ShellSuccess {
++                interleaved_output: Some("ordered output".into()),
++                ..Default::default()
++            },
++            "ordered output",
++        ),
++        (
++            pb::ShellSuccess {
++                output_location: Some(location()),
++                ..Default::default()
++            },
++            "Shell output file:",
++        ),
++        (
++            pb::ShellSuccess::default(),
++            "shell completed without output",
++        ),
++    ] {
++        let completion = complete(pb::exec_client_message::Message::ShellResult(
++            pb::ShellResult {
++                result: Some(pb::shell_result::Result::Success(success)),
++                ..Default::default()
++            },
++        ))
++        .await;
++        assert!(completion.content.starts_with(expected));
++        assert!(!completion.is_error);
++    }
++    let completion = complete(pb::exec_client_message::Message::ShellStream(
++        pb::ShellStream {
++            event: Some(pb::shell_stream::Event::SandboxUnsupported(
++                pb::ShellSandboxUnsupported {
++                    reason: "sandbox unavailable".into(),
++                    ..Default::default()
++                },
++            )),
++        },
++    ))
++    .await;
++    assert!(completion.is_error);
++    assert_eq!(completion.content, "sandbox unavailable");
 +}

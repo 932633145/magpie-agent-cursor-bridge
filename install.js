@@ -8,10 +8,11 @@ import {paths,run,verifyPackage,initializeCertificate,stage,activate,stopJob,lab
 const source=path.dirname(fileURLToPath(import.meta.url));
 const manifest=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8'));
 const command=process.argv[2]||'setup';
-// agent.js passes CURSOR_BRIDGE_ROOT when it falls back to setup(), and tests
-// rely on it to install into a scratch tree. Ignoring it made "isolated" runs
-// rewrite the real profile: installation.json, the release dir and the Startup
-// entry all landed in the user's home, and a second supervisor came up.
+// Tests pass CURSOR_BRIDGE_ROOT to install into a scratch tree. Ignoring it made
+// "isolated" runs rewrite the real profile: installation.json, the release dir
+// and the Startup entry all landed in the user's home, and a second supervisor
+// came up. The supervisor's own update takes the variable out of its child's
+// environment, so an upgrade of the real profile installs into the real profile.
 const rooted=process.env.CURSOR_BRIDGE_ROOT;
 const p=pathed(paths(os.homedir()));
 function pathed(base) {

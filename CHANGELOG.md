@@ -1,5 +1,143 @@
 # Changelog
 
+## 0.2.8-beta-9
+
+### Fixed
+
+- 修复 Shell 只有 `output_location`、交错输出或头尾摘要时，被错误转成“无输出”的问题。现在保留输出文件路径、字节数、行数及可用摘要，提示模型通过同一执行环境的 Read 工具读取；不会在桥接宿主上读取 SSH 远端路径。
+- 流式 Shell 退出时，成功与失败结果均保留客户端提供的输出文件位置；失败和沙箱不支持仍按错误返回，不伪装成成功。
+
+### 验证范围
+
+- 固定原生基线 `2068ab20513288e6a0289d33febe872a30608610`，Windows x64 与 macOS arm64 均重新构建。两平台先证明旧适配器上的 3 个输出回归测试全部失败，再验证修复后 218 个 Rust 测试、70 个隔离 Node 测试全部通过，包含 `tool_round` 完整工具轮次集成测试。
+- 构建记录：[Windows](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986695)、[macOS](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986591)。原生引擎自报版本仍为 `0.2.1`。macOS 架构、系统动态库依赖与签名结构检查通过，不代表 Developer ID 签名或公证。
+- 2026-11-11 在 Windows 11 / Cursor 3.27.22 / Magpie 0.1.3770 中，通过 Magpie 安装 Git 候选，由 Supervisor 自动暂存并切换发布后进行真实 GUI 验收。临时项目的 3 个 Shell 调用和 1 个 Read 全部完成：小输出正常；退出码 7 的预期失败保留错误状态；295,139 字节 / 2,401 行长输出保留文件引用，模型通过 Read 找回内联截断范围外的随机值，下一轮无需工具即可准确复述。桥接数据库核对两轮 completed、6 次模型请求 completed/HTTP 200，截图与证据只保留本机。
+- 回归夹具来自协议字段及客户端实现分析，并非报告者失败请求的抓包；不能据此认定 Issue #10 的特定 stdout 现象只有这一原因。macOS GUI 上的新修复尚未独立实测。
+- 本次 beta-9 **仅含 Shell 输出修复和构建验证改进**，不含此前撤回的独立设置页、高级模型配置或实验性本地 Tab；相关尝试仍保留在独立功能分支。
+
+## 0.2.8-beta-8
+
+### Changed
+
+- 为 Apple Silicon macOS 增加独立的 GitHub Actions 原生构建：固定 cursor-byok v1.0.1 提交并应用完整 `source.patch`，涵盖 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连和子智能体处理。
+- macOS 构建脚本先运行原生回归测试，再检查 arm64 架构、系统动态库依赖和代码签名；构建目录与源码分离，避免嵌入编译产物。
+- macOS 打包按 `engine_version` 校验原生版本，仅更新 macOS 哈希，保留 Windows 哈希；新增打包回归测试。
+- Windows 原生构建脚本补上 `bridge_route` 回归测试；本次不重建 Windows 二进制。
+
+### 验证范围
+
+- GitHub Actions macOS 15 arm64 构建通过：197 个 Rust 测试、70 个隔离 Node 测试全部通过；产物通过 arm64 架构、系统动态库依赖与代码签名检查。构建记录：https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566 。
+- macOS 发布二进制 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；引擎自报版本仍为 `0.2.1`。Windows 本地隔离 Node 测试 70/70 通过，Windows 引擎哈希保持 beta-7 不变。
+- 2026-11-11，[Issue #10 报告者](https://github.com/932633145/magpie-agent-cursor-bridge/issues/10#issuecomment-6796941990)确认 Apple Silicon macOS 27.2 / Cursor 3.29.15 的 GUI 单轮问答恢复，并提供 `llm_calls completed/200`、`runs root completed`；CLI 与 Auto 路由正常。此为报告者实机结果，非维护者独立复测；多轮、工具和子智能体未覆盖。
+- 本 Fork 主要面向新版 Cursor，优先跟进 3.29.15 及更新版本；不要求降级验证 3.26.16，也不据此承诺所有新旧版本兼容。系统证书信任安装未由维护者独立验证。
+
+### 升级提示
+
+- 旧版 macOS 引擎升级后，模型哈希可能变化：身份计算已移除显示名。CLI 脚本固定的旧 `--model` ID 可能被客户端拒绝，应通过 `cursor-agent --list-models` 重新查询；GUI 如有旧选择也需重选。此次仅补充验证记录与迁移说明，不改版本或发布二进制。
+
+## 0.2.8-beta-7
+
+### Fixed
+
+- 修复 Cursor 子智能体启动请求缺少 `message_id` 或只包含一个父请求头时被桥接引擎拒绝的问题。缺失的消息 ID 根据消息内容确定性生成，父请求头可分别提供。
+
+### 验证范围
+
+- 修改需要重新构建原生引擎才能生效；本版本 Windows 引擎包含该修复，macOS 引擎未重建，不包含该修复。
+- Cursor 子智能体的端到端验证须在 Magpie 更新后进行。
+
+## 0.2.8-beta-6
+
+### Fixed
+
+- 修复 Magpie 网关的 `/models` 临时超时或错误会导致桥接主动停止、杀掉正常运行的引擎并让 Cursor 断开的稳定性问题。现在健康引擎会保留现有模型目录和代理连接，下一轮继续刷新模型目录。
+
+## 0.2.8-beta-5
+
+### Fixed
+
+- 修复「Cursor Agent 突然提示 `You've hit your usage limit`，之后整轮对话都不能用」：Cursor 用它上一次读到的模型目录给 Agent Run 命名模型，因此可能送来 `default`（Cursor 自带的 Auto）或一个当前目录里已经不存在的哈希。旧引擎把「不是 Magpie 模型」的 Run 一律转发到 Cursor 官方上游 `api2.cursor.sh`，本机登录账号的额度用完后上游返回 `ResourceExhausted`（`ERROR_RATE_LIMITED_CHANGEABLE`），编辑器就弹出这条「升级到 Pro」的提示。现在桥接把这类 Run 改写成 Magpie 里选中的默认模型并在本地执行，Agent Run 不再被交给 Cursor 上游；新增原生回归测试 `server/tests/bridge_route.rs` 断言 Cursor Auto 落到 Magpie 路由、而目录里存在的哈希保持客户端选择。
+- 模型身份哈希只由路由决定（请求地址、密钥、上游模型、OpenAI 端点），不再包含显示名。此前在 Magpie 里给模型改名或改分组会换哈希，Cursor 已经存下的模型选择随即变成 `unknown model: <hash>`；现在改名不影响已有选择，旧哈希也会按上一条规则落到默认路由上。
+
+### Changed
+
+- 重新生成 `source.patch`，并按 v1.0.1（`2068ab2`）重建 Windows 引擎，`integrity.json` 更新对应 SHA-256；引擎自报版本仍为 `0.2.1`。产物已在纯净的 v1.0.1 工作树上 `git apply --check` 通过，打补丁后的源码与本仓库开发树逐文件一致（仅行尾不同）。
+- macOS 二进制未重建，仍不包含这些原生修复。
+- `integrity.json` 的 `engine`（macOS 引擎哈希）此前是 `e67ba3f8…`，而仓库里 `bin/cursor-magpie-bridge` 的实际 SHA-256 是 `c30b83c8…`，两者从加入 Windows 支持的那次提交起就不一致，macOS 安装会在哈希校验处直接失败。现在按仓库里实际发布的二进制填写。Windows 侧仍按 `engine_win32_x64` 校验，不受影响。
+
+### 验证提示
+
+- 在 Magpie 更新插件后由后台 Supervisor 自动升级；不必改 Cursor 设置，也不必重启 Cursor，新建对话即可。
+- 升级后第一次使用旧对话时，Cursor 缓存的旧模型哈希会落到 Magpie 里选中的默认模型；想用其他模型请在模型菜单里重新选择一次。
+
+## 0.2.8-beta-4
+
+### Fixed
+
+- 修复在 Magpie 里切换默认模型时报 `magpie-agent-cursor-bridge: connect: ReferenceError: process is not defined`：`connect()` 曾在同步阶段读取 `process.env` 决定是否自启，而 Magpie 用 moejs 运行插件模块（没有 `process`、没有定时器，也不能 `import` Node 内置模块），异常直接从 `connect()` 抛出，这次连接写不进任何配置，模型也就没切过去。现在 `agent.js` 只保留插件描述和 `connect()` 返回的配置，不再触碰任何宿主 API。
+- 修复「在 Magpie 更新插件后仍跑旧版本」：模块在 moejs 里无法启动进程，原先写在 `agent.js` 里的自启与重装逻辑实际从未执行过。现在由后台 Supervisor（真实 Node 进程）把 `installation.json` 指向的插件版本与自身版本比较，发现更新后调用该插件的 `install.js setup`，由其暂存新的发布副本、停掉旧进程并启动新版本；同一版本失败后 10 分钟内不重试，测试用隔离目录不会触发。
+
+### Changed
+
+- `agent.js` 的说明文案改为：首次使用需运行 `setup.ps1`；之后在 Magpie 更新插件会自动升级；切换模型即时生效，无需重启 Cursor。
+- 新增 `lib/upgrade.js`（`sourceUpdate`）及其单元测试；`agent.test.js` 增加「在没有任何 Node 全局对象的沙箱里调用 `connect()`」的回归用例，`config.test.js` 不再需要隔离根目录。
+
+### 验证提示
+
+- 本次仍要执行一次 `setup.ps1`：正在运行的 0.2.8-beta-3 Supervisor 还没有自升级逻辑。装好 beta-4 之后，再在 Magpie 更新插件就不必手动运行装脚本了。
+- 切换模型后约 1 秒生效；不必重启 Cursor。
+
+## 0.2.8-beta-3
+
+### Added
+
+- Cursor 的「生成提交信息」改由桥接引擎本地生成，使用的是**桥接里配置的默认模型**（即在 Magpie → Agents → Cursor · Magpie Bridge 中选中的那个模型）；在 Magpie 里换模型后，提交信息与分支名同步跟随。此前引擎的 `commit_settings.model_id` 一直为空，判定为直连，请求被转发到默认 TAB 服务 `https://tab.leokun.cn` 并报 `[unavailable] http error: error sending request`。现在引擎在启动与模型目录热更新时把该设置固定为默认模型行的 `model_hash`。
+- 提交信息提示词改为「语言跟随 diff」：语言判断依次看最近的提交信息、注释与文档、界面文案，没有线索时用英文；已有自定义提示词不会被覆盖。
+- 「生成分支名」（`aiserver.v1.AiService/WriteGitBranchName`）改为本地生成：与提交信息共用同一个默认模型，输出前规范化为合法 git ref（小写、kebab-case、折叠并去除 `..`/`//`/首尾分隔符、上限 60 字符），不再转发到 Cursor 上游。
+
+### Changed
+
+- 原生测试目标新增 `--test commit_message` 与 `--bin cursor-magpie-bridge`，覆盖分支名生成与提交模型同步。
+- Windows 引擎重建，`integrity.json` 更新对应 SHA-256；引擎自报版本仍为 `0.2.1`。
+
+### Fixed
+
+- 修复测试把工作区插件安装进真实环境：`connect()` 的自动安装微任务会在测试清掉 `MAGPIE_CURSOR_BRIDGE_NO_AUTOSTART` 之后才运行，于是从插件源码目录 stage 了一份 release 到用户目录并重启后台。现在 `start()` 在 `connect()` 的同步阶段就锁定「是否自启」与「隔离根目录」，`setup()` 也按这个决定传递 `CURSOR_BRIDGE_ROOT`；`agent.test.js` 另外在文件级使用临时根目录兜底，并新增回归用例断言不会产生安装产物。
+
+### 验证提示
+
+- 提交信息与分支名只用 Magpie 里选中的那一个模型，不会使用 Cursor 自己的模型设置。
+- 插件版本变更会触发重新 stage 发布副本：在 Magpie 更新插件后关闭再打开一次桥接开关，并在 Cursor 执行 Developer: Reload Window，再测试提交信息与分支名。
+
+## 0.2.8-beta-2
+
+### Fixed
+
+- 修复桥接连上后用户在 Cursor 里改的设置被还原：撤销日志（`settings-journal.json`）此前保存了整份 `settings.json` 快照，而且每次 600ms 轮询都把用户的新改动算进“桥接写入后的文件”，停机或重启时整份快照被写回，字号、状态栏、扩展默认值等都被改回旧值。现在日志只记录桥接自己写过的 6 个代理键，还原时逐键撤销，其余设置原样保留。
+- 日志不再复制用户设置全文，其中可能包含扩展的 API key 等敏感内容。
+
+## 0.2.9-beta
+
+### Fixed
+
+- 修复切换 VPN / 代理工具后模型请求失败（`error sending request for url (http://127.0.0.1:3425/v1/responses)`）：桥接引擎访问本机 Magpie 网关的 HTTP 客户端不再跟随 Windows 系统代理，也不读取 `HTTP_PROXY` 等环境变量，回环请求始终直连网关。此前引擎按系统代理设置出网，代理工具退出或切换后残留的失效代理地址会让回环请求一并失败。
+- 发往 Cursor 上游的客户端行为不变；新增回归测试覆盖“环境代理指向死端口时网关请求仍直连”。
+
+### 验证提示
+
+- Magpie 更新插件后，关闭再打开 Cursor 桥接开关即可，无需重新安装。
+
+## 0.2.8-beta
+
+### Fixed
+
+- 修复新会话持续 Reconnecting：专用桥接在 BootstrapStatsig 中明确选择已支持的 Agent Run 协议，不再继承上游 `agent_host_local_loop` 灰度配置，避免将 RunInference 请求误解码为会话状态。
+- 上游正常响应和本地 fallback 均应用相同的协议能力约束，覆盖明文、djb2、sha256 三种开关名称编码；普通 cursor-byok 保持上游选择不变。
+
+### 验证提示
+
+- Magpie 更新插件后，关闭再打开 Cursor 桥接开关。已打开的 Cursor 窗口可能缓存旧运行模式；若仍重连，请手动执行 Reload Window 后再新建对话。插件不会自动强杀 Cursor。
+
 ## 0.2.7
 
 A toggle restarted Cursor to make it re-read `http.proxy`, which cost every open

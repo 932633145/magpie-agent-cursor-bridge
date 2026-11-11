@@ -63,6 +63,23 @@ test('fresh machines generate distinct CAs without a BYOK install, database or t
 
 test('package and native engine have the same pinned version and digest',()=>{assert.equal(verifyPackage(source).version,version);});
 
+test('installer accepts SemVer prereleases and rejects malformed versions',t=>{
+  const plugin=path.join(temp(t),'plugin');
+  fs.mkdirSync(plugin,{recursive:true});
+  const manifest=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8'));
+  // 只链接只读载荷；版本清单写入独立沙箱，不改真实安装目录。
+  for(const name of ['agent.js','bridge.js','install.js','setup.command','setup.ps1','setup.cmd','npm-shrinkwrap.json','lib','bin','icon.svg','icon.png','README.md','LICENSE','THIRD_PARTY_NOTICES.md','integrity.json']) {
+    if(fs.statSync(path.join(source,name)).isDirectory()) fs.symlinkSync(path.join(source,name),path.join(plugin,name),'junction');
+    else fs.copyFileSync(path.join(source,name),path.join(plugin,name));
+  }
+  fs.symlinkSync(path.join(source,'node_modules'),path.join(plugin,'node_modules'),'junction');
+  for(const value of ['0.2.8-beta','0.2.8-beta.1','0.2.8+build.1','0.2.8','01.2.8','0.2.8-beta.01','0.2.8-','../0.2.8']) {
+    fs.writeFileSync(path.join(plugin,'package.json'),JSON.stringify({...manifest,version:value}));
+    if(['01.2.8','0.2.8-beta.01','0.2.8-','../0.2.8'].includes(value)) assert.throws(()=>verifyPackage(plugin),/无效的发布版本/);
+    else assert.equal(verifyPackage(plugin).version,value);
+  }
+});
+
 test('a JavaScript release verifies against its pinned engine build, not its own number',t=>{
   // The native engine's version is compiled in, so a JS-only release ships an
   // engine that still reports 0.2.1. integrity.json pins both.
@@ -78,7 +95,7 @@ test('an integrity file without engine_version still pins the engine to the rele
   const dir=temp(t),plugin=path.join(dir,'plugin');
   fs.mkdirSync(plugin,{recursive:true});
   for(const name of fs.readdirSync(source)) {
-    if(['node_modules','.git'].includes(name) || name.startsWith(TEST_SCRATCH)) continue;
+    if(['node_modules','.git','.native-source','.native-target'].includes(name) || name.startsWith(TEST_SCRATCH)) continue;
     fs.cpSync(path.join(source,name),path.join(plugin,name),{recursive:true});
   }
   fs.cpSync(path.dirname(createRequire(import.meta.url).resolve('jsonc-parser/package.json')),path.join(plugin,'node_modules/jsonc-parser'),{recursive:true});
@@ -171,7 +188,7 @@ test('GitHub installation supports a dependency hoisted by Magpie Bun',t=>{
  for(const name of fs.readdirSync(source)) {
    // Skip the plugin's own dependencies and the scratch tree a sandboxed run
    // may have created inside the package; copying either recurses into itself.
-   if(['node_modules','.git'].includes(name) || name.startsWith(TEST_SCRATCH)) continue;
+   if(['node_modules','.git','.native-source','.native-target'].includes(name) || name.startsWith(TEST_SCRATCH)) continue;
    fs.cpSync(path.join(source,name),path.join(plugin,name),{recursive:true});
  }
  fs.cpSync(path.dirname(createRequire(import.meta.url).resolve('jsonc-parser/package.json')),path.join(parent,'jsonc-parser'),{recursive:true});

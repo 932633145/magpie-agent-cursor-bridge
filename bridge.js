@@ -11,6 +11,7 @@ import {claim,held,release} from './lib/lock.js';
 import {readWired, nextMagpieGate} from './lib/magpie.js';
 import {shouldRevive} from './lib/watch.js';
 import {listenFixed} from './lib/relay.js';
+import {sourceUpdate} from './lib/upgrade.js';
 
 // Cursor caches the proxy address it read from settings.json, so an engine that
 // takes a fresh port on every restart leaves Cursor dialing a closed one until it
@@ -197,6 +198,48 @@ if(command==='status') {
   function watchAlive() {
     return held(file('watchdog.lock/owner.json'));
   }
+  // Magpie updates a plugin by replacing its files: the agent module it runs in
+  // moejs cannot start a process, so without this the release staged before that
+  // update would serve forever and the update would look applied while the build
+  // stayed the same. The plugin's own installer stages the new release, stops
+  // this process by its recorded pid and start time, and starts the new build.
+  let upgradeTried='',upgradeAt=0,nextUpgradeCheck=0;
+  function installUpdate() {
+    if (process.env.CURSOR_BRIDGE_NO_UPGRADE === '1') return;
+    // A scratch root is a test tree, and installing the real profile from it is
+    // exactly the leak this check must not become.
+    if (root !== path.join(os.homedir(), '.config', 'magpie-cursor-bridge')) return;
+    if (Date.now() < nextUpgradeCheck) return;
+    nextUpgradeCheck = Date.now() + 60000;
+    const next = sourceUpdate(root, version);
+    if (!next) return;
+    // A failed install (a hash mismatch, the installer's own lock) must not be
+    // retried on every pass; a new plugin version is a new attempt.
+    if (next.version === upgradeTried && Date.now() - upgradeAt < 600000) return;
+    upgradeTried = next.version; upgradeAt = Date.now();
+    const note = (text) => fs.appendFileSync(file('upgrade.log'), `${new Date().toISOString()} ${text}\n`);
+    // The runtime copied into this release is the one the Startup entry uses; a
+    // machine with no Node or Bun of its own must still be able to upgrade.
+    const copy = path.join(packageDir, 'bin', process.platform === 'win32' ? 'runtime.exe' : 'runtime');
+    const runtime = fs.existsSync(copy) ? copy : process.execPath;
+    const env = {...process.env};
+    // CURSOR_BRIDGE_ROOT sends the installer's Startup entry into a scratch
+    // folder; the watchdog hands that variable to every supervisor it starts,
+    // even for the real profile.
+    delete env.CURSOR_BRIDGE_ROOT;
+    let child;
+    try {
+      child = spawn(runtime, [path.join(next.source, 'install.js'), 'setup'], {
+        cwd: next.source, detached: true, stdio: 'ignore', windowsHide: true, env
+      });
+    } catch (error) {
+      note(`${version} -> ${next.version} could not start: ${error?.message || error}`);
+      return;
+    }
+    note(`${version} -> ${next.version} (${next.source})`);
+    child.on?.('error', error => note(`${version} -> ${next.version} failed: ${error?.message || error}`));
+    child.unref?.();
+  }
   const signals=process.platform==='win32'?['SIGINT','SIGBREAK']:['SIGTERM','SIGINT'];
   for(const signal of signals) process.on(signal,()=>{ending=true;});
   // A supervisor must never leave Cursor pointed at a proxy that is gone: that
@@ -219,6 +262,7 @@ if(command==='status') {
       // Kept outside the try below: a watchdog that cannot be started must never
       // be the reason the proxy stops serving.
       try { ensureWatch(); } catch {}
+      try { installUpdate(); } catch {}
       try {
         // Magpie switches an agent off in its own state, leaving this plugin's
         // config untouched. A missing `wired` flag also appears after Magpie
@@ -251,7 +295,22 @@ if(command==='status') {
         else {
           const changed=raw!==lastConfig;
           if(changed || Date.now()>=nextRefresh || !child || child.exitCode!==null || child.signalCode!==null) {
-            const effective=await gatewayModels(c);
+            let effective;
+            try {
+              effective=await gatewayModels(c);
+            } catch (error) {
+              // A temporary gateway failure must not tear down a healthy engine.
+              // Keep the last effective catalogue and proxy serving; retry the
+              // refresh on the next pass. Only startup failures are fatal because
+              // there is no working engine to preserve in that case.
+              if(child && child.exitCode===null && child.signalCode===null && relay && ready) {
+                nextRefresh=Date.now()+4000;
+                status('connected',{model:c.model,models:lastModels,proxy:publicProxy(),backend:ready.backend,pid:child.pid,refreshError:error.message});
+                lastConfig=raw;paused=false;pausedRetries=0;
+                continue;
+              }
+              throw error;
+            }
             // The gateway answers in tens of milliseconds, so a longer period
             // only delayed a model added in Magpie; Cursor re-reads the catalog
             // on its own schedule and needs the new entries to be there.

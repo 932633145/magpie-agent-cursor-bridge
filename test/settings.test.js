@@ -27,6 +27,29 @@ test('malformed settings stay intact and retain crash recovery journal',t=>{
 });
 test('recovery is idempotent',t=>{const [s,j]=setup(t);applyProxy(s,j,'http://127.0.0.1:1234');restoreProxy(j);assert.deepEqual(restoreProxy(j),[]);});
 
+test('settings changed while connected survive the next apply pass and the restore',t=>{
+  // The supervisor reapplies the proxy every pass. Folding the file it reads
+  // into the undo made the next restore put back a snapshot from before the
+  // user changed anything: font size, status bar and extension defaults all
+  // reverted on every stop or restart.
+  const [s,j]=setup(t);
+  fs.writeFileSync(s,'{"editor.fontSize":16,"workbench.statusBar.visible":true}');
+  applyProxy(s,j,'http://127.0.0.1:1234');
+  fs.writeFileSync(s,fs.readFileSync(s,'utf8').replace('16','20').replace('true','false'));
+  applyProxy(s,j,'http://127.0.0.1:1234');
+  assert.deepEqual(restoreProxy(j),[]);
+  assert.deepEqual(document(s).data,{'editor.fontSize':20,'workbench.statusBar.visible':false});
+  assert.equal(document(s).data['http.proxy'],undefined);
+});
+
+test('the journal records the proxy keys, not a copy of the whole file',t=>{
+  const [s,j]=setup(t);
+  fs.writeFileSync(s,'{"editor.fontSize":16,"extension.apiKey":"placeholder"}');
+  applyProxy(s,j,'http://127.0.0.1:1234');
+  const journal=fs.readFileSync(j,'utf8');
+  assert.ok(!journal.includes('fontSize')&&!journal.includes('placeholder'),journal);
+});
+
 test('a bridge proxy with no journal is still removed on disconnect',t=>{
   // Turning the agent off must give Cursor its own model list back. Without
   // this, a crash or a paused reclaim left the proxy keys pointing at a closed

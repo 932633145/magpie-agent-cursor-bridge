@@ -1,0 +1,46 @@
+name: Windows x64 native engine
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'fix/beta9-shell-output']
+    paths: ['.github/workflows/native-windows.yml', 'source.patch', 'scripts/**', 'test/**', 'lib/**', 'package.json', 'npm-shrinkwrap.json', 'integrity.json']
+  pull_request:
+    paths: ['.github/workflows/native-windows.yml', 'source.patch', 'scripts/**', 'test/**', 'lib/**', 'package.json', 'npm-shrinkwrap.json', 'integrity.json']
+permissions:
+  contents: read
+concurrency:
+  group: native-windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Configure public dependency transport
+        run: |
+          git config --global url."https://github.com/".insteadOf git@github.com:
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Build and test isolated native source
+        run: powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1
+      - name: Run isolated plugin tests
+        env:
+          CURSOR_BRIDGE_ROOT: ${{ runner.temp }}/bridge-test-root
+          CURSOR_BRIDGE_SETTINGS: ${{ runner.temp }}/bridge-test-home/settings.json
+        run: node --test test/*.test.js
+      - name: Record provenance
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory artifacts
+          Copy-Item bin/cursor-magpie-bridge.exe,integrity.json artifacts/
+          @("Plugin commit: $(git rev-parse HEAD)", "Native base: 2068ab20513288e6a0289d33febe872a30608610", "Target: x86_64-pc-windows-msvc", "$(rustc --version)", "$(cargo --version)", "Patch SHA256: $((Get-FileHash source.patch).Hash)", "Engine SHA256: $((Get-FileHash bin/cursor-magpie-bridge.exe).Hash)", "Validation: old adapters fail shell_output tests; fixed adapters pass native and Node suites", "Not validated by CI: real Cursor GUI and certificate installation") | Set-Content artifacts/BUILD-INFO.txt
+          Compress-Archive bin/cursor-magpie-bridge.exe artifacts/cursor-magpie-bridge-windows-x64.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cursor-magpie-bridge-windows-x64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

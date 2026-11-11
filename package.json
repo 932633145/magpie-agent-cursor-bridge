@@ -1,16 +1,16 @@
 {
   "name": "magpie-agent-cursor-bridge",
-  "version": "0.2.7",
+  "version": "0.2.8-beta-9",
   "type": "module",
-  "description": "Cursor protocol bridge backed by Magpie for Windows and macOS",
+  "description": "Community-maintained fork of the Cursor protocol bridge backed by Magpie for Windows and macOS",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/932633145/magpie-agent-cursor-bridge.git"
+    "url": "git+https://github.com/flylink-code/magpie-agent-cursor-bridge.git"
   },
-  "homepage": "https://github.com/932633145/magpie-agent-cursor-bridge#readme",
+  "homepage": "https://github.com/flylink-code/magpie-agent-cursor-bridge#readme",
   "bugs": {
-    "url": "https://github.com/932633145/magpie-agent-cursor-bridge/issues"
+    "url": "https://github.com/flylink-code/magpie-agent-cursor-bridge/issues"
   },
   "magpie": {
     "agent": "./agent.js",
