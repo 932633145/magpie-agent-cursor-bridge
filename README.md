@@ -12,6 +12,7 @@
 
 ## 当前版本与验证范围
 
+- `0.2.8-beta-9`：修复 Shell 输出文件引用、交错输出及头尾摘要丢失，流式退出也保留输出位置；模型通过同一环境的 Read 获取完整输出，桥接不会读取远端路径。Windows x64 与 macOS arm64 均已重建：两平台旧代码上的 3 个回归测试全部失败，修复后各 218 个 Rust 测试、70 个隔离 Node 测试通过。[Windows 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986695) / [macOS 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986591)。此版本不含已撤回的设置页、高级模型配置或实验性本地 Tab；macOS GUI 新修复尚未独立实测，也未认定报告者 stdout 现象的唯一原因。
 - `0.2.8-beta-8`：补齐 Apple Silicon macOS 原生引擎的构建与发布流程，应用当前完整 `source.patch`，包含 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连及子智能体处理。[GitHub Actions macOS 15 arm64 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566)已通过 197 个 Rust 测试和 70 个隔离 Node 测试，以及 arm64 架构、系统动态库依赖、代码签名检查。macOS 引擎 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；构建来源随预发布附件提供。Windows 二进制沿用 beta-7。
 - **新版 Cursor 实机反馈**：2026-11-11，[Issue #10 报告者](https://github.com/932633145/magpie-agent-cursor-bridge/issues/10#issuecomment-6796941990)确认在 Apple Silicon macOS 27.2、Cursor **3.29.15** 上安装 beta-8 并核对引擎哈希后，GUI 单轮问答正常，桥接记录为 `llm_calls completed/200`、`runs root completed`；CLI 与 Auto 路由也正常。这是报告者的实机结果，不是维护者独立复测。
 - **支持方向与验证边界**：本 Fork 主要面向新版 Cursor，后续优先跟进 3.29.15 及更新版本的协议和使用情况；这不代表已验证所有更新版本，也不承诺旧版本兼容。3.26.16 未复测，不要求为验收降级。多轮、真实工具调用和子智能体仍待验证，不能由单轮成功扩大为全功能通过。代码签名检查只确认产物签名结构有效，不代表 Apple Developer ID 身份签名或公证；系统证书信任安装未由维护者独立验证。

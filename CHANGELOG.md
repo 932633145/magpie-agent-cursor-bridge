@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.2.8-beta-9
+
+### Fixed
+
+- 修复 Shell 只有 `output_location`、交错输出或头尾摘要时，被错误转成“无输出”的问题。现在保留输出文件路径、字节数、行数及可用摘要，提示模型通过同一执行环境的 Read 工具读取；不会在桥接宿主上读取 SSH 远端路径。
+- 流式 Shell 退出时，成功与失败结果均保留客户端提供的输出文件位置；失败和沙箱不支持仍按错误返回，不伪装成成功。
+
+### 验证范围
+
+- 固定原生基线 `2068ab20513288e6a0289d33febe872a30608610`，Windows x64 与 macOS arm64 均重新构建。两平台先证明旧适配器上的 3 个输出回归测试全部失败，再验证修复后 218 个 Rust 测试、70 个隔离 Node 测试全部通过，包含 `tool_round` 完整工具轮次集成测试。
+- 构建记录：[Windows](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986695)、[macOS](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/43044986591)。原生引擎自报版本仍为 `0.2.1`。macOS 架构、系统动态库依赖与签名结构检查通过，不代表 Developer ID 签名或公证。
+- 回归夹具来自协议字段及客户端实现分析，并非报告者失败请求的抓包；不能据此认定 Issue #10 的特定 stdout 现象只有这一原因。macOS GUI 上的新修复尚未独立实测。
+- 本次 beta-9 **仅含 Shell 输出修复和构建验证改进**，不含此前撤回的独立设置页、高级模型配置或实验性本地 Tab；相关尝试仍保留在独立功能分支。
+
 ## 0.2.8-beta-8
 
 ### Changed

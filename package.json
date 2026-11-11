@@ -1,6 +1,6 @@
 {
   "name": "magpie-agent-cursor-bridge",
-  "version": "0.2.8-beta-8",
+  "version": "0.2.8-beta-9",
   "type": "module",
   "description": "Community-maintained fork of the Cursor protocol bridge backed by Magpie for Windows and macOS",
   "license": "MIT",
