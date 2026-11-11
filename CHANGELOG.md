@@ -13,7 +13,12 @@
 
 - GitHub Actions macOS 15 arm64 构建通过：197 个 Rust 测试、70 个隔离 Node 测试全部通过；产物通过 arm64 架构、系统动态库依赖与代码签名检查。构建记录：https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566 。
 - macOS 发布二进制 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；引擎自报版本仍为 `0.2.1`。Windows 本地隔离 Node 测试 70/70 通过，Windows 引擎哈希保持 beta-7 不变。
-- 尚未实测 Cursor 3.29.15 / 3.26.16 GUI、macOS 27.2 和系统证书安装；不能将自动化测试通过等同于真实 GUI Agent 已验证。更新后需 Reload Window 并新建对话，详情见 README。
+- 2026-11-11，[Issue #10 报告者](https://github.com/932633145/magpie-agent-cursor-bridge/issues/10#issuecomment-6796941990)确认 Apple Silicon macOS 27.2 / Cursor 3.29.15 的 GUI 单轮问答恢复，并提供 `llm_calls completed/200`、`runs root completed`；CLI 与 Auto 路由正常。此为报告者实机结果，非维护者独立复测；多轮、工具和子智能体未覆盖。
+- 本 Fork 主要面向新版 Cursor，优先跟进 3.29.15 及更新版本；不要求降级验证 3.26.16，也不据此承诺所有新旧版本兼容。系统证书信任安装未由维护者独立验证。
+
+### 升级提示
+
+- 旧版 macOS 引擎升级后，模型哈希可能变化：身份计算已移除显示名。CLI 脚本固定的旧 `--model` ID 可能被客户端拒绝，应通过 `cursor-agent --list-models` 重新查询；GUI 如有旧选择也需重选。此次仅补充验证记录与迁移说明，不改版本或发布二进制。
 
 ## 0.2.8-beta-7
 

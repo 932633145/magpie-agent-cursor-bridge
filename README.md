@@ -13,7 +13,8 @@
 ## 当前版本与验证范围
 
 - `0.2.8-beta-8`：补齐 Apple Silicon macOS 原生引擎的构建与发布流程，应用当前完整 `source.patch`，包含 Agent Run 协商、BidiAppend、Auto/失效模型哈希本地路由、网关直连及子智能体处理。[GitHub Actions macOS 15 arm64 构建](https://github.com/flylink-code/magpie-agent-cursor-bridge/actions/runs/42970154566)已通过 197 个 Rust 测试和 70 个隔离 Node 测试，以及 arm64 架构、系统动态库依赖、代码签名检查。macOS 引擎 SHA-256：`a147a83b1d3d19998fc7b7f9119b2aa55e031b1b9975093333e281e577fcf8d2`；构建来源随预发布附件提供。Windows 二进制沿用 beta-7。
-- **验证边界**：代码签名检查只确认产物签名结构有效，不代表 Apple Developer ID 身份签名或公证。macOS 自动化构建和测试不等于 Cursor GUI 实测；Cursor 3.29.15 / 3.26.16、macOS 27.2、钥匙串信任安装和真实工具/子智能体轮次仍需用户验证。旧版出现过“安装成功、模型目录可见，但 GUI Agent 不工作”，因此不能只以 connected 或模型列表作为验收标准。
+- **新版 Cursor 实机反馈**：2026-11-11，[Issue #10 报告者](https://github.com/932633145/magpie-agent-cursor-bridge/issues/10#issuecomment-6796941990)确认在 Apple Silicon macOS 27.2、Cursor **3.29.15** 上安装 beta-8 并核对引擎哈希后，GUI 单轮问答正常，桥接记录为 `llm_calls completed/200`、`runs root completed`；CLI 与 Auto 路由也正常。这是报告者的实机结果，不是维护者独立复测。
+- **支持方向与验证边界**：本 Fork 主要面向新版 Cursor，后续优先跟进 3.29.15 及更新版本的协议和使用情况；这不代表已验证所有更新版本，也不承诺旧版本兼容。3.26.16 未复测，不要求为验收降级。多轮、真实工具调用和子智能体仍待验证，不能由单轮成功扩大为全功能通过。代码签名检查只确认产物签名结构有效，不代表 Apple Developer ID 身份签名或公证；系统证书信任安装未由维护者独立验证。
 - `0.2.8-beta-7`：Windows 引擎处理子智能体请求缺少 `message_id` 或仅携带一个父请求头的情况。Windows 发布引擎已构建；新增 Rust 回归测试未运行，一次子智能体任务已完成，但尚未独立核实该任务经过此桥接，也不能证明每种协议边界都已验证。
 - `0.2.8-beta-6`：模型目录刷新临时失败时，保留仍健康的引擎和代理，避免因此主动断开 Cursor。
 - beta-7 及更早预览版的新增原生修复只进入 Windows x64 二进制，macOS 引擎当时未重建；下文历史说明中的“macOS 未重建”均指对应旧版，不代表 beta-8 的发布范围。
@@ -97,7 +98,9 @@ github:flylink-code/magpie-agent-cursor-bridge
 
 **beta-8 升级验收**：从 Magpie 更新 `github:flylink-code/magpie-agent-cursor-bridge` 后，确认插件版本为 `0.2.8-beta-8`，运行 `bash setup.command status` 检查服务。若旧 Supervisor 未自动升级，在更新后的插件目录执行 `bash setup.command`。不要只下载 Release 附件后覆盖正在运行的引擎，安装器需要同步暂存版本和完整性清单。
 
-在 Cursor 执行一次 **Developer: Reload Window**，刷新旧的运行模式缓存，再新建对话。先测普通问答和多轮，再测工具、Auto/默认模型、子智能体；同时确认 Magpie 网关确有对应模型请求，而非只确认目录可见。分别记录 Cursor 版本、结果和运行中发布目录的引擎 SHA-256。若反馈日志，只提供脱敏的错误与请求标识，不上传完整 `connection.json`、数据库、密钥或对话内容。停用后确认代理恢复。
+在 Cursor 执行一次 **Developer: Reload Window**，刷新旧的运行模式缓存，再新建对话。主要使用新版 Cursor 验收，无需为此降级旧版本：先测普通问答和多轮，再测工具、Auto/默认模型、子智能体；同时确认 Magpie 网关确有对应模型请求，而非只确认目录可见。分别记录 Cursor 版本、结果和运行中发布目录的引擎 SHA-256。若反馈日志，只提供脱敏的错误与请求标识，不上传完整 `connection.json`、数据库、密钥或对话内容。停用后确认代理恢复。
+
+**CLI 模型 ID 迁移**：从旧版 macOS 引擎升级后，模型 ID（哈希）可能变化。新版身份计算不再包含显示名，避免以后仅改名就使选择失效。若脚本固定使用旧的 `--model` ID 并提示 `Cannot use this model`，请先运行 `cursor-agent --list-models` 查询当前 ID，再更新脚本；GUI 如保留旧选择，也需重新选择当前模型目录中的模型。桥接的失效模型回退不保证绕过 CLI 自身的目录校验。
 
 1. **运行初始化**：
    在终端中运行：
