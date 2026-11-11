@@ -159,7 +159,8 @@ test('the notice says how the bridge gets installed, updated and refreshed', () 
   assert.match(agent.notice, /setup\.ps1/, 'first use names the installer');
   assert.match(agent.notice, /自动升级/, 'an update in Magpie applies itself');
   assert.match(agent.notice, /无需重启/);
-  assert.match(agent.notice, /选中的模型/, 'the SCM actions use the selected model too');
+  assert.match(agent.notice, /默认跟随.*高级设置中独立选择/, 'Git inherits the main model unless explicitly configured');
+  assert.match(agent.notice, /Tab 默认保留原有转发/);
 });
 
 test('the embedded logo is a decodable PNG, not a hand-edited string', () => {

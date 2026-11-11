@@ -32,6 +32,8 @@ test('settings service exposes only public state and refuses writes or rebinding
   const url = `http://127.0.0.1:${server.address().port}`;
   fs.writeFileSync(path.join(root, 'connection.json'), JSON.stringify({key: 'SECRET', gateway: 'PRIVATE', model: 'p/a', models: [{id: 'p/a', name: '<img onerror=bad>'}]}));
   fs.writeFileSync(path.join(root, 'status.json'), JSON.stringify({state: 'connected', heartbeat: Date.now(), reason: 'SECRET'}));
+  fs.mkdirSync(path.join(root, 'data'));
+  fs.writeFileSync(path.join(root, 'data/roles-status.json'), JSON.stringify({revision:'old', preferences:{gitPrompt:'PRIVATE_PROMPT'}, gitModel:'p/a', tabMode:'forward'}));
   const data = await (await fetch(url + '/api/state')).text();
   assert.doesNotMatch(data, /SECRET|PRIVATE/); assert.equal(JSON.parse(data).models[0].id, 'p/a');
   assert.equal((await fetch(url + '/api/state', {method: 'POST', body: '{}'})).status, 405);

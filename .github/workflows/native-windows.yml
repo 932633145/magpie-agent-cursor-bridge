@@ -31,6 +31,15 @@ jobs:
           CURSOR_BRIDGE_ROOT: ${{ runner.temp }}/bridge-test-root
           CURSOR_BRIDGE_SETTINGS: ${{ runner.temp }}/bridge-test-home/settings.json
         run: node --test test/*.test.js
+      - name: Test sandboxed settings in Chromium
+        env:
+          PLAYWRIGHT_REQUIRE_FROM: ${{ runner.temp }}/bridge-browser/package.json
+          UI_BROWSER: chromium
+        shell: pwsh
+        run: |
+          npm install --prefix "$env:RUNNER_TEMP/bridge-browser" --ignore-scripts --no-audit --no-fund playwright@1.57.0
+          node "$env:RUNNER_TEMP/bridge-browser/node_modules/playwright/cli.js" install chromium
+          node test/ui-browser.mjs
       - name: Record provenance
         shell: pwsh
         run: |

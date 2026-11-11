@@ -42,7 +42,7 @@
       $('mainModel').textContent = data.mainModel || '—';
       $('gitApplied').textContent = alive && data.applied ? (data.applied.gitError || data.applied.gitModel || '—') : '—';
       $('tabApplied').textContent = alive && data.applied ? `${data.applied.tabMode} · ${data.applied.tabError || data.applied.tabModel || '—'}` : '—';
-      $('applied').textContent = !alive || !data.applied ? '待接入后确认' : JSON.stringify(data.applied.preferences) === JSON.stringify(saved) ? '引擎已应用保存的配置' : '引擎尚未应用当前保存配置';
+      $('applied').textContent = data.bridge?.preferencesError || (!alive || !data.applied ? '待接入后确认' : data.applied.revision === data.desiredRevision ? '引擎已应用本地配置快照' : '引擎尚未应用当前配置快照');
     } catch (error) { $('state').textContent = error.message; }
   }
   function canonical(options) {
@@ -57,7 +57,11 @@
       const value = Object.fromEntries(['gitModel', 'gitPrompt', 'tabMode', 'tabModel'].map(key => [key, $(key).value]));
       if (value.tabMode === 'local' && !value.tabModel) throw new Error('请先选择本地补全模型');
       options = await call('save', {...options, ...value}); saved = canonical(options);
-      $('result').textContent = '配置已保存，等待引擎确认';
+      $('result').textContent = '配置已保存，正在重新加载设置服务';
+      // options.set retires the plugin host. Re-enter Magpie's hosted page to
+      // warm the new host and persist its derived preferences before polling.
+      const entry = new URLSearchParams(location.hash.slice(1)).get('entry');
+      if (entry) { location.replace(entry); return; }
       await refresh();
     } catch (error) { $('result').textContent = error.message; }
     finally { $('save').disabled = false; }

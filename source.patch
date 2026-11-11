@@ -1165,10 +1165,10 @@ index 80103d1..9fa0a66 100644
          return Ok((false, body));
 diff --git a/server/src/cursor/services/bridge_roles.rs b/server/src/cursor/services/bridge_roles.rs
 new file mode 100644
-index 0000000..ef93b84
+index 0000000..a9eb08e
 --- /dev/null
 +++ b/server/src/cursor/services/bridge_roles.rs
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,131 @@
 +//! Dedicated bridge role preferences, snapshotted once per request.
 +use std::{collections::HashMap, sync::Arc};
 +use parking_lot::{Mutex, RwLock};
@@ -1176,7 +1176,7 @@ index 0000000..ef93b84
 +use tokio_util::sync::CancellationToken;
 +use crate::{store::{Store, CommitSettings}, Error, Result};
 +
-+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
++#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 +#[serde(rename_all = "camelCase")]
 +pub struct Preferences {
 +    #[serde(default)] pub git_model: String,
@@ -1212,8 +1212,16 @@ index 0000000..ef93b84
 +    }
 +    pub fn snapshot(&self) -> (String, Preferences) { self.state.read().clone() }
 +    pub fn set(&self, main: String, preferences: Preferences) {
-+        *self.state.write() = (main, preferences);
++        let mut state = self.state.write();
++        *state = (main, preferences);
 +        for (_, token) in self.pending.lock().drain() { token.cancel(); }
++    }
++    pub fn begin_for(&self, document: String, preferences: &Preferences) -> Option<CompletionGuard> {
++        // Hold the snapshot read lock through registration: reload cannot cancel
++        // old work and then accidentally admit a request using the old snapshot.
++        let state = self.state.read();
++        if &state.1 != preferences { return None; }
++        self.begin(document)
 +    }
 +    pub fn begin(&self, document: String) -> Option<CompletionGuard> {
 +        let mut pending = self.pending.lock();
@@ -1261,6 +1269,15 @@ index 0000000..ef93b84
 +        assert!(roles.pending.lock().is_empty());
 +    }
 +    #[test]
++    fn snapshot_registered_after_reload_is_rejected() {
++        let roles=BridgeRoles::new("main".into(),Preferences::default());
++        let (_,old)=roles.snapshot();
++        roles.set("main".into(),Preferences{tab_mode:"off".into(),..Default::default()});
++        assert!(roles.begin_for("old".into(),&old).is_none());
++        let (_,current)=roles.snapshot();
++        assert!(roles.begin_for("current".into(),&current).is_some());
++    }
++    #[test]
 +    fn concurrent_document_budget_is_bounded_and_reclaimed() {
 +        let roles=BridgeRoles::new("main".into(),Preferences::default());
 +        let guards:Vec<_>=(0..32).map(|i|roles.begin(i.to_string()).unwrap()).collect();
@@ -1285,10 +1302,10 @@ index 0000000..ef93b84
 +}
 diff --git a/server/src/cursor/services/bridge_tab.rs b/server/src/cursor/services/bridge_tab.rs
 new file mode 100644
-index 0000000..999a1e6
+index 0000000..5d81373
 --- /dev/null
 +++ b/server/src/cursor/services/bridge_tab.rs
-@@ -0,0 +1,156 @@
+@@ -0,0 +1,163 @@
 +//! Minimal current-file completion adapter. No filesystem reads or upstream fallback.
 +use std::{convert::Infallible, time::Duration};
 +use axum::{body::{to_bytes, Body}, http::{Request, Response, header}};
@@ -1382,12 +1399,16 @@ index 0000000..999a1e6
 +    }
 +    let timeout = request.headers().get("connect-timeout-ms").and_then(|h| h.to_str().ok()).and_then(|h| h.parse::<u64>().ok()).unwrap_or(2000).min(2000);
 +    let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout);
-+    let bytes = to_bytes(request.into_body(), MAX_REQUEST).await.map_err(|_| crate::Error::Protocol("Tab request exceeds limit".into()))?;
++    let bytes = match tokio::time::timeout_at(deadline,to_bytes(request.into_body(), MAX_REQUEST)).await {
++        Ok(Ok(bytes)) => bytes,
++        Ok(Err(_)) => return Err(crate::Error::Protocol("Tab request exceeds limit".into())),
++        Err(_) => return Ok(empty_stream()),
++    };
 +    let request: ai::StreamCppRequest = connect::decode_unary(&bytes)?;
 +    let Some(context) = request.current_file.and_then(context) else { return Ok(empty_stream()); };
 +    let document = format!("{}:{}", request.workspace_id.unwrap_or_default(), context.path);
 +    let session = {use sha2::{Digest,Sha256}; format!("cursor-tab-{:x}",Sha256::digest(document.as_bytes()))};
-+    let Some(guard) = roles.begin(document) else { return Ok(empty_stream()); };
++    let Some(guard) = roles.begin_for(document, &preferences) else { return Ok(empty_stream()); };
 +    let Ok(hash) = model_hash(registry.store(), &preferences.tab_model).await else { return Ok(empty_stream()); };
 +    let provider = registry.conversations().dependencies().provider.clone();
 +    let invocation = invocation(hash, &context, session);
@@ -1411,11 +1432,14 @@ index 0000000..999a1e6
 +        if !cancellation.is_cancelled() {
 +            if let Some(text) = generated.as_deref().and_then(|text| replacement(&context, text)) {
 +                let range = ai::StreamCppResponse {range_to_replace:Some(ai::LineRange {start_line_number:context.line_number,end_line_number_inclusive:context.line_number}),..Default::default()};
-+                yield Ok::<_,Infallible>(connect::encode_message(&range).expect("protobuf encoding"));
 +                let suggestion = ai::StreamCppResponse {text,..Default::default()};
-+                yield Ok(connect::encode_message(&suggestion).expect("protobuf encoding"));
-+                yield Ok(connect::encode_message(&ai::StreamCppResponse {done_edit:Some(true),..Default::default()}).expect("protobuf encoding"));
-+                yield Ok(connect::encode_message(&ai::StreamCppResponse {done_stream:Some(true),..Default::default()}).expect("protobuf encoding"));
++                // Publish one complete edit atomically: no await/yield between its
++                // range and text where a newer request could supersede this one.
++                let mut frames = Vec::new();
++                for message in [range, suggestion, ai::StreamCppResponse {done_edit:Some(true),..Default::default()}, ai::StreamCppResponse {done_stream:Some(true),..Default::default()}] {
++                    frames.extend_from_slice(&connect::encode_message(&message).expect("protobuf encoding"));
++                }
++                if !cancellation.is_cancelled() { yield Ok::<_,Infallible>(bytes::Bytes::from(frames)); }
 +            }
 +        }
 +        drop(guard);
@@ -2154,7 +2178,7 @@ index 0c02fac..f0c6a99 100644
 +    }
  }
 diff --git a/server/src/provider/recorder.rs b/server/src/provider/recorder.rs
-index 652fc4e..59395fd 100644
+index 652fc4e..b490ff5 100644
 --- a/server/src/provider/recorder.rs
 +++ b/server/src/provider/recorder.rs
 @@ -111,7 +111,8 @@ const MAX_BUFFER_AGE: std::time::Duration = std::time::Duration::from_millis(50)
@@ -2167,6 +2191,35 @@ index 652fc4e..59395fd 100644
          store.start_llm_call(&call).await?;
          Ok(Self {
              inner: Arc::new(Inner {
+@@ -416,10 +417,11 @@ mod tests {
+             })
+             .await
+             .unwrap();
++        store.set_detailed_logging(true).await.unwrap();
+         let recorder = CallRecorder::start(
+             store.clone(),
+             NewLlmCall {
+-                call_id: "cancel-on-drop".into(),
++                call_id: "tab-cancel-on-drop".into(),
+                 run_id: "run".into(),
+                 conversation_id: "conversation".into(),
+                 provider_call_index: 0,
+@@ -440,13 +442,14 @@ mod tests {
+         .await
+         .unwrap();
+ 
++        assert!(!recorder.inner.detailed, "Tab must never record source even when detailed logging is enabled");
+         drop(recorder.cancel_on_drop());
+ 
+         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+         loop {
+             let status: String =
+                 sqlx::query_scalar("SELECT status FROM llm_calls WHERE call_id = ?")
+-                    .bind("cancel-on-drop")
++                    .bind("tab-cancel-on-drop")
+                     .fetch_one(store.pool())
+                     .await
+                     .unwrap();
 diff --git a/server/src/store/models.rs b/server/src/store/models.rs
 index 6d29d3c..cde9106 100644
 --- a/server/src/store/models.rs
@@ -2574,10 +2627,10 @@ index 0000000..8ff1216
 +}
 diff --git a/server/tests/bridge_tab.rs b/server/tests/bridge_tab.rs
 new file mode 100644
-index 0000000..262d350
+index 0000000..aa26ae1
 --- /dev/null
 +++ b/server/tests/bridge_tab.rs
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,99 @@
 +#[path = "support/fake_provider.rs"] mod fake_provider;
 +#[path = "support/fixtures.rs"] mod fixtures;
 +use std::{path::Path, sync::Arc};
@@ -2641,6 +2694,29 @@ index 0000000..262d350
 +    // An unpolled response body owns its guard: dropping it frees its document slot.
 +    let response=router.oneshot(request("/aiserver.v1.AiService/StreamCpp")).await.unwrap();drop(response);
 +    let guards:Vec<_>=(0..32).map(|i|roles.begin(i.to_string()).unwrap()).collect();drop(guards);
++}
++
++#[tokio::test]
++async fn superseding_request_cancels_an_inflight_completion_without_stale_text() {
++    let (_dir,store)=fixtures::temp_store().await;store.create_model(&input("tab")).await.unwrap();
++    let provider=fake_provider::FakeProvider::default();
++    let ready=provider.push_gated(vec![ModelEvent::TextDelta(r#"{"insert":"stale"}"#.into()),ModelEvent::Done(FinishReason::Stop)]);
++    provider.push(vec![ModelEvent::TextDelta(r#"{"insert":"42"}"#.into()),ModelEvent::Done(FinishReason::Stop)]);
++    let assets=PromptAssets::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("prompt/cursor").as_path()).unwrap();
++    let registry=TransportRegistry::new(store.clone(),Arc::new(provider.clone()),PromptCompiler::new(assets));
++    let roles=BridgeRoles::new("tab".into(),Preferences{tab_mode:"local".into(),tab_model:"tab".into(),..Default::default()});
++    let router=cursor::router(registry,NetworkClients::new(store)).unwrap().layer(axum::Extension(roles));
++    let first=router.clone().oneshot(request("/aiserver.v1.AiService/StreamCpp")).await.unwrap();
++    let first=tokio::spawn(async {to_bytes(first.into_body(),65536).await.unwrap()});
++    tokio::time::timeout(std::time::Duration::from_secs(1),async {
++        while provider.requests().is_empty() {tokio::task::yield_now().await;}
++    }).await.unwrap();
++    let second=router.oneshot(request("/aiserver.v1.AiService/StreamCpp")).await.unwrap();
++    let fresh=to_bytes(second.into_body(),65536).await.unwrap();
++    ready.notify_one();
++    let old=first.await.unwrap();
++    let frames=connect::decode_frames(&old).unwrap();assert_eq!(frames.len(),1);assert_eq!(frames[0].0,connect::END_STREAM_FLAG);
++    assert!(connect::decode_frames(&fresh).unwrap().len()>1);
 +}
 +
 +#[tokio::test]

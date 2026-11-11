@@ -22,13 +22,13 @@ const shell = http.createServer((request, response) => {
     response.setHeader('Content-Security-Policy', "sandbox allow-scripts; default-src 'none'; script-src http://127.0.0.1:"+shell.address().port+"; connect-src 'none'; frame-src 'none'");
     response.end('<p id="note"></p><script src="wrapper.js"></script>');return;
   }
-  if (request.url === '/wrapper.js') return;
   response.end('<!doctype html><iframe sandbox="allow-scripts" src="/entry"></iframe>');
 });
 await new Promise(resolve => shell.listen(0,'127.0.0.1',resolve));
 const browserType = process.env.UI_BROWSER === 'webkit' ? webkit : chromium;
-const browser = await browserType.launch(process.env.UI_BROWSER_EXECUTABLE ? {executablePath:process.env.UI_BROWSER_EXECUTABLE} : {});
+let browser;
 try {
+  browser = await browserType.launch(process.env.UI_BROWSER_EXECUTABLE ? {executablePath:process.env.UI_BROWSER_EXECUTABLE} : {});
   const page = await browser.newPage({viewport:{width:480,height:900}});
   await page.route('**/wrapper.js', async route => {
     // Exact host wrapper contract; the destination page uses real postMessage.
@@ -43,7 +43,9 @@ try {
   await page.addInitScript(() => {
     if (window === window.top) addEventListener('message', async event => {
       if (event.data?.magpie !== 1) return;
-      event.source.postMessage({magpie:1,id:event.data.id,result:await window.bridgeOptions(event.data)}, '*');
+      const result = await window.bridgeOptions(event.data);
+      if (event.data.method === 'options.set') window.savedBridgeOptions = result;
+      event.source.postMessage({magpie:1,id:event.data.id,result}, '*');
     });
   });
   await page.goto(`http://127.0.0.1:${shell.address().port}/`);
@@ -55,14 +57,16 @@ try {
   await frame.locator('#tabMode').selectOption('local');
   await frame.locator('#tabModel').selectOption('tab');
   await frame.locator('#save').click();
-  try { await frame.locator('#result').filter({hasText:'已保存'}).waitFor({timeout:12000}); }
-  catch(error) { console.error('UI diagnostic:', await frame.locator('body').innerText(), saved, messages); throw error; }
+  await page.waitForFunction(() => window.savedBridgeOptions?.tabMode === 'local');
+  // Saving re-enters the host wrapper, then restores the saved options.
+  await frame.locator('#tabMode').filter({has:frame.locator('option:checked[value="local"]')}).waitFor({timeout:12000});
+  assert.match(page.frames()[1].url(), /#entry=/);
   assert.equal(saved.port,port);assert.equal(saved.gitModel,'main');assert.equal(saved.tabModel,'tab');assert.equal(saved.tabMode,'local');
   assert.ok(messages>=3);
   assert.equal(await frame.locator('body').evaluate(el=>el.scrollWidth>innerWidth),false);
   console.log('PASS: sandbox navigation, options persistence, missing model, narrow viewport');
 } finally {
-  await browser.close(); service.closeAllConnections(); shell.closeAllConnections();
+  await browser?.close(); service.closeAllConnections(); shell.closeAllConnections();
   await Promise.all([new Promise(r=>service.close(r)),new Promise(r=>shell.close(r))]);
   fs.rmSync(root,{recursive:true,force:true});
 }
