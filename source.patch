@@ -1,3 +1,25 @@
+diff --git a/server/build.rs b/server/build.rs
+index e6237f4..16f8b64 100644
+--- a/server/build.rs
++++ b/server/build.rs
+@@ -27,6 +27,17 @@ fn main() {
+     }
+     let aiserver_source = std::fs::read_to_string(&aiserver_proto).expect("read aiserver_v1.proto");
+     for required in [
++        "message StreamCppRequest",
++        "CurrentFileInfo current_file = 1;",
++        "optional string workspace_id = 18;",
++        "message StreamCppResponse",
++        "optional LineRange range_to_replace = 11;",
++        "optional bool done_edit = 13;",
++        "optional bool done_stream = 4;",
++        "message CurrentFileInfo",
++        "int32 contents_start_at_line = 9;",
++        "CursorPosition cursor_position = 3;",
++        "bool rely_on_filesync = 18;",
+         "message BidiAppendRequest",
+         "string data = 1;",
+         "BidiRequestId request_id = 2;",
 diff --git a/server/examples/magpie_smoke.rs b/server/examples/magpie_smoke.rs
 new file mode 100644
 index 0000000..9590ae9
@@ -499,7 +521,7 @@ index 623566a..a559131 100644
 +}
 diff --git a/server/src/bin/cursor-magpie-bridge.rs b/server/src/bin/cursor-magpie-bridge.rs
 new file mode 100644
-index 0000000..82f59c9
+index 0000000..724dc9b
 --- /dev/null
 +++ b/server/src/bin/cursor-magpie-bridge.rs
 @@ -0,0 +1,241 @@
@@ -543,7 +565,7 @@ index 0000000..82f59c9
 +            "group_name":"Magpie", "type":"openai", "base_url": c.gateway.trim_end_matches('/'),
 +            "api_key":c.key, "tooltip_data":format!("Magpie / {}",m.id), "model_id":m.id,
 +            "context_window_tokens":m.context.filter(|v| *v > 0),
-+            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.1"}
++            "custom_headers_enabled":true, "custom_headers":{"User-Agent":"cursor-magpie-bridge/0.2.1", "x-opencode-session":"{{SessionId}}"}
 +        }))?)
 +    }).collect::<Result<Vec<ModelConfigInput>, Box<dyn std::error::Error>>>()?;
 +    Ok(Catalogue { selected, models, preferences: c.preferences })
@@ -906,13 +928,19 @@ index dae5cf5..b7fe93b 100644
          );
          let prepared = tokio::select! {
 diff --git a/server/src/cursor/protocol/proto.rs b/server/src/cursor/protocol/proto.rs
-index 0d40c98..3be47fe 100644
+index 0d40c98..9f282e2 100644
 --- a/server/src/cursor/protocol/proto.rs
 +++ b/server/src/cursor/protocol/proto.rs
-@@ -26,6 +26,51 @@ pub mod aiserver {
+@@ -26,6 +26,57 @@ pub mod aiserver {
              pub data_binary: Vec<u8>,
          }
  
++        #[derive(Clone, PartialEq, ::prost::Message)]
++        pub struct AvailableCppModelsResponse {
++            #[prost(string, repeated, tag="1")] pub models: Vec<String>,
++            #[prost(string, optional, tag="2")] pub default_model: Option<String>,
++        }
++
 +        // Validated subset of Cursor's completion wire schema. The full extracted
 +        // aiserver proto contains duplicate declarations and cannot be compiled.
 +        #[derive(Clone, PartialEq, ::prost::Message)]
@@ -961,7 +989,7 @@ index 0d40c98..3be47fe 100644
          /// Commit message generation request. Only the fields the local
          /// generator consumes are decoded; credentials and heavyweight context
          /// fields are intentionally left to prost's unknown-field skipping.
-@@ -53,6 +98,22 @@ pub mod aiserver {
+@@ -53,6 +104,22 @@ pub mod aiserver {
              pub commit_message: String,
          }
  
@@ -1257,10 +1285,10 @@ index 0000000..ef93b84
 +}
 diff --git a/server/src/cursor/services/bridge_tab.rs b/server/src/cursor/services/bridge_tab.rs
 new file mode 100644
-index 0000000..fb8aa4f
+index 0000000..999a1e6
 --- /dev/null
 +++ b/server/src/cursor/services/bridge_tab.rs
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,156 @@
 +//! Minimal current-file completion adapter. No filesystem reads or upstream fallback.
 +use std::{convert::Infallible, time::Duration};
 +use axum::{body::{to_bytes, Body}, http::{Request, Response, header}};
@@ -1316,11 +1344,11 @@ index 0000000..fb8aa4f
 +    if (!context.before.trim().is_empty() && insert.starts_with(&context.before)) || (!context.after.trim().is_empty() && insert.ends_with(&context.after)) { return None; }
 +    Some(format!("{}{}{}", context.before, insert, context.after))
 +}
-+fn invocation(model: String, context: &Context) -> ModelInvocation {
++fn invocation(model: String, context: &Context, session: String) -> ModelInvocation {
 +    let call = format!("tab-{}", uuid::Uuid::new_v4());
 +    let content = serde_json::json!({"path":context.path,"language":context.language,
 +        "precedingLines":context.prefix,"lineBeforeCursor":context.before,"lineAfterCursor":context.after,"followingLines":context.suffix});
-+    ModelInvocation {call_id:call.clone(), run_id:call.clone(), conversation_id:call, provider_call_index:0,
++    ModelInvocation {call_id:call.clone(), run_id:call.clone(), conversation_id:session, provider_call_index:0,
 +        request:ModelRequest {prompt:PromptSpec {instructions:PROMPT.into(),tools:vec![]},
 +            model:ModelSpec {max_output_tokens:Some(512),..ModelSpec::new(model)},
 +            history:vec![ProjectedMessage {message_id:"tab-context".into(),role:Role::User,
@@ -1342,6 +1370,11 @@ index 0000000..fb8aa4f
 +            global_debounce_duration_millis:150,client_debounce_duration_millis:150,..Default::default()};
 +        return Ok(response(Body::from(config.encode_to_vec()), false));
 +    }
++    if path == "/aiserver.v1.CppService/AvailableModels" {
++        let model = if local { Some("magpie-local".to_string()) } else { None };
++        let catalog = ai::AvailableCppModelsResponse {models:model.clone().into_iter().collect(),default_model:model};
++        return Ok(response(Body::from(catalog.encode_to_vec()),false));
++    }
 +    if path.ends_with("/StreamNextCursorPrediction") || (path.ends_with("/StreamCpp") && !local) { return Ok(empty_stream()); }
 +    if !path.ends_with("/StreamCpp") {
 +        // No remote context sync, telemetry, or undeclared predictive capability.
@@ -1352,10 +1385,12 @@ index 0000000..fb8aa4f
 +    let bytes = to_bytes(request.into_body(), MAX_REQUEST).await.map_err(|_| crate::Error::Protocol("Tab request exceeds limit".into()))?;
 +    let request: ai::StreamCppRequest = connect::decode_unary(&bytes)?;
 +    let Some(context) = request.current_file.and_then(context) else { return Ok(empty_stream()); };
-+    let Some(guard) = roles.begin(format!("{}:{}", request.workspace_id.unwrap_or_default(), context.path)) else { return Ok(empty_stream()); };
++    let document = format!("{}:{}", request.workspace_id.unwrap_or_default(), context.path);
++    let session = {use sha2::{Digest,Sha256}; format!("cursor-tab-{:x}",Sha256::digest(document.as_bytes()))};
++    let Some(guard) = roles.begin(document) else { return Ok(empty_stream()); };
 +    let Ok(hash) = model_hash(registry.store(), &preferences.tab_model).await else { return Ok(empty_stream()); };
 +    let provider = registry.conversations().dependencies().provider.clone();
-+    let invocation = invocation(hash, &context);
++    let invocation = invocation(hash, &context, session);
 +    let stream = async_stream::stream! {
 +        // Drop guard cancels provider work when the HTTP body is dropped, as well
 +        // as on superseding requests and settings reloads.
@@ -2118,6 +2153,20 @@ index 0c02fac..f0c6a99 100644
 +        );
 +    }
  }
+diff --git a/server/src/provider/recorder.rs b/server/src/provider/recorder.rs
+index 652fc4e..59395fd 100644
+--- a/server/src/provider/recorder.rs
++++ b/server/src/provider/recorder.rs
+@@ -111,7 +111,8 @@ const MAX_BUFFER_AGE: std::time::Duration = std::time::Duration::from_millis(50)
+ 
+ impl CallRecorder {
+     pub async fn start(store: Store, mut call: NewLlmCall) -> Result<Self> {
+-        call.detailed = store.detailed_logging().await?;
++        // High-frequency editor completion never persists source context or output.
++        call.detailed = !call.call_id.starts_with("tab-") && store.detailed_logging().await?;
+         store.start_llm_call(&call).await?;
+         Ok(Self {
+             inner: Arc::new(Inner {
 diff --git a/server/src/store/models.rs b/server/src/store/models.rs
 index 6d29d3c..cde9106 100644
 --- a/server/src/store/models.rs
@@ -2525,20 +2574,20 @@ index 0000000..8ff1216
 +}
 diff --git a/server/tests/bridge_tab.rs b/server/tests/bridge_tab.rs
 new file mode 100644
-index 0000000..9dd1630
+index 0000000..262d350
 --- /dev/null
 +++ b/server/tests/bridge_tab.rs
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,76 @@
 +#[path = "support/fake_provider.rs"] mod fake_provider;
 +#[path = "support/fixtures.rs"] mod fixtures;
 +use std::{path::Path, sync::Arc};
 +use axum::{body::{Body,to_bytes}, http::Request};
 +use cursor_server::{api::cursor, cursor::{prompting::{PromptAssets,PromptCompiler}, protocol::{connect,proto::aiserver::v1 as ai},
-+    services::bridge_roles::{BridgeRoles,Preferences}, transport::TransportRegistry}, model::{ModelConfigInput,ModelType,OPENAI_CHAT_ENDPOINT},
++    services::bridge_roles::{BridgeRoles,Preferences}, transport::TransportRegistry}, model::ModelConfigInput,
 +    network::NetworkClients,provider::{ModelEvent,FinishReason}};
 +use prost::Message;
 +use tower::ServiceExt;
-+fn input(id:&str)->ModelConfigInput {serde_json::from_value(serde_json::json!({"sort_order":0,"display_name":id,"type":"openai","base_url":"http://127.0.0.1:3425/v1","api_key":"test-fixture","model_id":id})).unwrap()}
++fn input(id:&str)->ModelConfigInput {serde_json::from_value(serde_json::json!({"sort_order":0,"display_name":id,"type":"openai","base_url":"http://127.0.0.1:3425/v1","api_key":"test-fixture","tooltip_data":"test","model_id":id})).unwrap()}
 +fn request(path:&str)->Request<Body> {
 +    let message=ai::StreamCppRequest {current_file:Some(ai::CurrentFileInfo {contents:"let x = ;".into(),cursor_position:Some(ai::CursorPosition {line:0,column:8}),relative_workspace_path:"test.ts".into(),..Default::default()}),..Default::default()};
 +    Request::post(path).header("content-type","application/connect+proto").body(Body::from(connect::encode_message(&message).unwrap())).unwrap()
@@ -2577,6 +2626,23 @@ index 0000000..9dd1630
 +    }
 +    assert!(provider.requests().is_empty());
 +}
++#[tokio::test]
++async fn timeout_and_body_drop_cancel_without_publishing_partial_code() {
++    let (_dir,store)=fixtures::temp_store().await;store.create_model(&input("tab")).await.unwrap();
++    let provider=fake_provider::FakeProvider::default();provider.push_pending();
++    let assets=PromptAssets::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("prompt/cursor").as_path()).unwrap();
++    let registry=TransportRegistry::new(store.clone(),Arc::new(provider.clone()),PromptCompiler::new(assets));
++    let roles=BridgeRoles::new("tab".into(),Preferences{tab_mode:"local".into(),tab_model:"tab".into(),..Default::default()});
++    let router=cursor::router(registry,NetworkClients::new(store)).unwrap().layer(axum::Extension(roles.clone()));
++    let mut req=request("/aiserver.v1.AiService/StreamCpp");req.headers_mut().insert("connect-timeout-ms","1".parse().unwrap());
++    let response=router.clone().oneshot(req).await.unwrap();
++    let bytes=tokio::time::timeout(std::time::Duration::from_secs(2),to_bytes(response.into_body(),65536)).await.unwrap().unwrap();
++    let frames=connect::decode_frames(&bytes).unwrap();assert_eq!(frames.len(),1);assert_eq!(frames[0].0,connect::END_STREAM_FLAG);
++    // An unpolled response body owns its guard: dropping it frees its document slot.
++    let response=router.oneshot(request("/aiserver.v1.AiService/StreamCpp")).await.unwrap();drop(response);
++    let guards:Vec<_>=(0..32).map(|i|roles.begin(i.to_string()).unwrap()).collect();drop(guards);
++}
++
 +#[tokio::test]
 +async fn git_role_is_independent_of_main_and_invalid_selection_is_an_error() {
 +    let (_dir,store)=fixtures::temp_store().await;
