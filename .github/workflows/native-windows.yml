@@ -21,7 +21,8 @@ jobs:
         with:
           node-version: '22'
       - name: Configure public dependency transport
-        run: git config --global url."https://github.com/".insteadOf git@github.com:
+        run: |
+          git config --global url."https://github.com/".insteadOf git@github.com:
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Build and test isolated native source
         run: powershell -ExecutionPolicy Bypass -File scripts/build-native.ps1
